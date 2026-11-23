@@ -11,6 +11,8 @@ const EnvSchema = z.object({
   GEMINI_API_KEY: z.string().optional(),
   LIVE_MODEL: z.string().min(1).default('gemini-3.8-live'),
   VISION_MODEL: z.string().min(1).default('gemini-3.6-flash'),
+  /** Fast model for find-mode box detection (called up to ~1x/s while finding). */
+  LOCATE_MODEL: z.string().min(1).default('gemini-3.5-flash-lite'),
   LIVE_VOICE: z.string().min(1).default('Kore'),
   ASSISTANT_LANGUAGE: z.string().trim().min(2).max(40).regex(/^[A-Za-z ()-]+$/).default('English'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
@@ -32,6 +34,7 @@ export interface AppConfig {
   geminiApiKey: string | null;
   liveModel: string;
   visionModel: string;
+  locateModel: string;
   liveVoice: string;
   /** Language the assistant always speaks unless the user explicitly asks to switch (native-audio Live models take no language code). */
   language: string;
@@ -73,6 +76,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     geminiApiKey: blank(e.GEMINI_API_KEY),
     liveModel: e.LIVE_MODEL,
     visionModel: e.VISION_MODEL,
+    locateModel: e.LOCATE_MODEL,
     liveVoice: e.LIVE_VOICE,
     language: e.ASSISTANT_LANGUAGE,
     port: e.PORT,

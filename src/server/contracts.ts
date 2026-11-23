@@ -6,7 +6,7 @@
  *   src/server/session/**, src/server/live/**   conversation agent (ClientSession, Live bridge, tools, prompts)
  *   src/server/vision/**, src/shared/dates.ts, services/detector/**   vision agent
  */
-import type { FramePayload, LabelEvidence, ServerDetections, ServerMessage } from '../shared/protocol.js';
+import type { FramePayload, LabelEvidence, NormalizedBox, ServerDetections, ServerMessage } from '../shared/protocol.js';
 import type { AppConfig } from './config.js';
 
 export type Clock = () => Date;
@@ -41,6 +41,15 @@ export interface VisionService {
     now: Date;
     signal?: AbortSignal | undefined;
   }): Promise<{ text: string; latencyMs: number }>;
+  /**
+   * Gemini box detection for a free-text query ("salt", "the label text"). Boxes are normalised 0..1 (converted
+   * from Gemini's box_2d [ymin, xmin, ymax, xmax] in 0..1000). Empty array = not visible. Never fabricated.
+   */
+  locate(input: { frame: FramePayload; query: string; signal?: AbortSignal | undefined }): Promise<{
+    boxes: { label: string; box: NormalizedBox; score: number }[];
+    model: string;
+    latencyMs: number;
+  }>;
 }
 
 export interface DetectorService {

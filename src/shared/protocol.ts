@@ -23,9 +23,9 @@ export const OUTPUT_SAMPLE_RATE = 24_000; // PCM16 little-endian mono from the m
 export const INPUT_AUDIO_MIME = `audio/pcm;rate=${INPUT_SAMPLE_RATE}` as const;
 
 export const LIMITS = {
-  /** ws maxPayload on the server. A 1600px JPEG at q0.85 is typically 200-600 KB (base64 ~ x1.34). */
-  maxWsMessageBytes: 2_500_000,
-  maxFrameBase64Chars: 2_000_000,
+  /** ws maxPayload on the server. Detail stills (up to 4096 px, q0.9) can reach ~4-5 MB as base64. */
+  maxWsMessageBytes: 8_000_000,
+  maxFrameBase64Chars: 7_500_000,
   /** ~1 s of 16 kHz PCM16 is 32 000 bytes -> 42 668 base64 chars. Allow up to ~1.5 s per chunk. */
   maxAudioChunkBase64Chars: 64_000,
   maxTextChars: 2_000,
@@ -38,13 +38,27 @@ export const LIMITS = {
   snapshotMaxDim: 1_600,
   liveFrameJpegQuality: 0.7,
   snapshotJpegQuality: 0.85,
+  /** Full-resolution still for label reading (ImageCapture.takePhoto when available). Server crops text regions from it. */
+  detailMaxDim: 4_096,
+  detailJpegQuality: 0.9,
+  /** Grab this many video frames ~120 ms apart and keep the sharpest when no still-photo API exists. */
+  detailBestOf: 3,
+  /** Small frames used ONLY for object detection / find tracking; never forwarded to Gemini Live. */
+  detectFrameMaxDim: 640,
+  detectFrameJpegQuality: 0.6,
+  detectFrameMinIntervalMs: 250,
+  /** Gemini-based locate (find mode for non-COCO items) runs at most this often. */
+  locateMinIntervalMs: 1_200,
+  /** Find mode stops automatically after this long. */
+  findTimeoutMs: 90_000,
+  maxFindQueryChars: 80,
   /** A frame older than this is not used to answer a fresh question; a new capture is required. */
   frameMaxAgeMs: 2_500,
   /** Server waits this long for the client to answer a snapshot.request. */
   snapshotRequestTimeoutMs: 8_000,
   /** Detection results older than this are cleared from overlays. */
-  detectionTtlMs: 2_500,
-  detectionMinIntervalMs: 1_000,
+  detectionTtlMs: 1_500,
+  detectionMinIntervalMs: 250,
   maxDetections: 50,
   maxTranscriptEntries: 200,
   maxClientReconnectAttempts: 5,
@@ -96,7 +110,7 @@ export type FramePayload = z.infer<typeof FramePayload>;
 export const SessionMode = z.enum(['live', 'snapshot']);
 export type SessionMode = z.infer<typeof SessionMode>;
 
-export const InspectPurpose = z.enum(['read_label', 'look_again']);
+export const InspectPurpose = z.enum(['read_label', 'look_again', 'locate']);
 export type InspectPurpose = z.infer<typeof InspectPurpose>;
 
 // ---------------------------------------------------------------------------
@@ -197,6 +211,8 @@ export const Detection = z.object({
   label: z.string().min(1).max(80),
   score: z.number().min(0).max(1),
   box: NormalizedBox,
+  /** True for the object currently being searched for in find mode. */
+  target: z.boolean().optional(),
 });
 export type Detection = z.infer<typeof Detection>;
 
@@ -244,6 +260,17 @@ export const ClientText = z.object({
   frame: FramePayload.optional(),
 });
 
+/** Small frame (<= detectFrameMaxDim, <= 4 FPS) for the object detector / find tracking only. Never sent to Gemini Live. */
+export const ClientDetectFrame = z.object({ type: z.literal('detect.frame'), frame: FramePayload });
+
+/** Start find mode from the UI ("Find the salt"). The Live tool find_object starts the same flow. */
+export const ClientFind = z.object({
+  type: z.literal('find'),
+  requestId: RequestId,
+  query: z.string().trim().min(1).max(LIMITS.maxFindQueryChars),
+});
+export const ClientFindStop = z.object({ type: z.literal('find.stop') });
+
 /** Explicit UI controls that do not rely on the model choosing a tool. */
 export const ClientAction = z.object({
   type: z.literal('action'),
@@ -281,6 +308,9 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ClientAudio,
   ClientAudioEnd,
   ClientFrame,
+  ClientDetectFrame,
+  ClientFind,
+  ClientFindStop,
   ClientText,
   ClientAction,
   ClientSnapshotResult,
@@ -381,7 +411,7 @@ export const ServerSnapshotRequest = z.object({
 export const ServerTool = z.object({
   type: z.literal('tool'),
   callId: z.string().max(128),
-  name: z.enum(['read_label', 'look_again']),
+  name: z.enum(['read_label', 'look_again', 'find_object']),
   state: z.enum(['started', 'completed', 'cancelled', 'failed']),
 });
 
@@ -411,8 +441,41 @@ export const ServerDetections = z.object({
   detectedAt: z.number().int(),
   model: z.string().max(100),
   detections: z.array(Detection).max(LIMITS.maxDetections),
+  /** yolo = local COCO detector (generic classes); gemini = Gemini box detection for a specific query. Absent = yolo. */
+  source: z.enum(['yolo', 'gemini']).optional(),
 });
 export type ServerDetections = z.infer<typeof ServerDetections>;
+
+export const FindState = z.enum([
+  'searching', // looking, nothing matched yet
+  'tracking', // target visible in the image, not centred
+  'centered', // target near the image centre
+  'lost', // target was visible but is no longer
+  'not_found', // gave up for this frame sequence / query not detectable
+  'stopped', // user or app stopped find mode
+  'timeout',
+]);
+export type FindState = z.infer<typeof FindState>;
+
+/**
+ * Find-mode progress. Positions are IMAGE-RELATIVE (where the item is in the camera picture), used to help the
+ * user aim the camera. They are never physical distances or walking directions.
+ */
+export const ServerFind = z.object({
+  type: z.literal('find'),
+  requestId: RequestId.nullable(),
+  query: z.string().max(LIMITS.maxFindQueryChars),
+  state: FindState,
+  source: z.enum(['yolo', 'gemini']),
+  /** Normalised target box (0..1) in the frame it was detected in, or null when not visible. */
+  target: z.object({ label: z.string().max(80), score: z.number().min(0).max(1), box: NormalizedBox }).nullable(),
+  frameId: z.number().int().nonnegative().nullable(),
+  /** Short image-relative description, e.g. "left of the picture, near the bottom, small". */
+  description: z.string().max(160).nullable(),
+  /** Server epoch ms. */
+  at: z.number().int(),
+});
+export type ServerFind = z.infer<typeof ServerFind>;
 
 export const ServerError = z.object({
   type: z.literal('error'),
@@ -442,6 +505,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   ServerEvidence,
   ServerAnswer,
   ServerDetections,
+  ServerFind,
   ServerError,
   ServerNotice,
 ]);

@@ -19,7 +19,8 @@
     "test:e2e": "playwright test",
     "check:secrets": "node scripts/check-client-secrets.mjs",
     "check:models": "tsx scripts/check-models.ts",
-    "verify": "npm run typecheck && npm run lint && npm run build && npm test && npm run check:secrets"
+    "verify": "npm run typecheck && npm run lint && npm run build && npm test && npm run check:secrets",
+    "detector": "cd services/detector && uv run python server.py --port 8765"
   },
   "dependencies": {
     "@google/genai": "3.6.1",
@@ -27,6 +28,7 @@
     "express": "5.3.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
+    "sharp": "0.35.5",
     "ws": "8.23.0",
     "zod": "4.6.7"
   },

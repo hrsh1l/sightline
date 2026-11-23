@@ -11,8 +11,10 @@
 import type {
   ClientSettings,
   ErrorCode,
+  FindState,
   FramePayload,
   LabelEvidence,
+  NormalizedBox,
   ServerDetections,
   SessionMode,
 } from '../shared/protocol.js';
@@ -55,6 +57,10 @@ export interface CameraState {
   videoHeight: number;
   /** More than one videoinput known after permission. */
   canSwitch: boolean;
+  /** Torch (flash light) support on the active track, and whether it is on. */
+  torch: { supported: boolean; on: boolean };
+  /** A full-resolution still-photo path (ImageCapture.takePhoto) is available for the active track. */
+  stillCapture: boolean;
   /** Human-readable, safe message for non-active states. */
   message: string | null;
 }
@@ -85,12 +91,31 @@ export interface CameraController extends Store<CameraState> {
   resume(): Promise<void>;
   /** Capture a frame now. Returns null if the video has no valid dimensions or the camera is not active. */
   capture(opts: CaptureOptions): Promise<CapturedFrame | null>;
+  /**
+   * Highest-quality still for reading small print: ImageCapture.takePhoto() at the sensor's photo resolution when
+   * supported (scaled to opts.maxDim), otherwise the sharpest of `bestOf` video frames. Never upscales.
+   * Returns null when the camera is not active.
+   */
+  captureStill(opts: CaptureOptions & { bestOf?: number }): Promise<CapturedFrame | null>;
+  /** Turn the torch on/off. Resolves false when unsupported or refused. */
+  setTorch(on: boolean): Promise<boolean>;
 }
 
 /**
  * Samples ambient frames at <= 1 FPS into a single latest-frame slot (no queue).
  * onFrame is invoked with each new frame; if the consumer is still busy, older frames are dropped.
  */
+export interface FrameSamplerConfig {
+  intervalMs: number;
+  maxDim: number;
+  jpegQuality: number;
+  /**
+   * Floor for intervalMs. Defaults to LIMITS.liveFrameMinIntervalMs (1 FPS, the Live API limit). The detection
+   * sampler (never sent to Live) may lower it to LIMITS.detectFrameMinIntervalMs.
+   */
+  minIntervalMs?: number;
+}
+
 export interface FrameSampler {
   start(onFrame: (frame: CapturedFrame) => void): void;
   stop(): void;
@@ -147,6 +172,39 @@ export interface AudioPlayer extends Store<PlayerState> {
   close(): Promise<void>;
 }
 
+/** Image-relative target for spatial cues (normalised to the camera picture, not physical space). */
+export interface CueTarget {
+  /** Box centre, 0..1 from left / top of the picture. */
+  cx: number;
+  cy: number;
+  /** Box area as a fraction of the picture, 0..1 (bigger = fills more of the picture). */
+  area: number;
+  centered: boolean;
+}
+
+export type Earcon = 'session_start' | 'session_end' | 'listening' | 'capture' | 'working' | 'found' | 'lost' | 'error';
+
+/**
+ * Non-speech audio + haptic feedback. Stereo panning works best with headphones (the S25's two speakers are only
+ * left/right in landscape), so pitch also encodes vertical position and beep rate encodes how centred the target is.
+ */
+export interface SpatialCueEngine {
+  readonly supported: boolean;
+  /** Create/resume its AudioContext. MUST be called synchronously inside a user gesture handler. */
+  unlock(): Promise<void>;
+  /** Continuous aiming cue. null = no target (silence after a short "lost" cue). */
+  setTarget(target: CueTarget | null): void;
+  /** Start/stop the continuous aiming cue loop (find mode). */
+  startTracking(): void;
+  stopTracking(): void;
+  /** One-shot event sound (and matching vibration if haptics enabled). */
+  earcon(kind: Earcon): void;
+  /** Lower cue volume while the assistant speaks. */
+  setDucked(ducked: boolean): void;
+  configure(opts: { earcons: boolean; spatial: boolean; haptics: boolean; headphones: boolean }): void;
+  close(): Promise<void>;
+}
+
 /** Browser speech synthesis for snapshot mode. */
 export interface SpeechOutput {
   readonly supported: boolean;
@@ -198,7 +256,17 @@ export interface Announcement {
   politeness: 'polite' | 'assertive';
 }
 
-export type BusyKind = 'connecting' | 'reading_label' | 'looking' | 'answering';
+export type BusyKind = 'connecting' | 'reading_label' | 'looking' | 'answering' | 'finding';
+
+export interface FindStatus {
+  query: string;
+  state: FindState;
+  source: 'yolo' | 'gemini';
+  target: { label: string; score: number; box: NormalizedBox } | null;
+  description: string | null;
+  /** Client epoch ms of the last update. */
+  updatedAt: number;
+}
 
 export interface AssistantSettings extends ClientSettings {
   /** Show the camera preview (camera keeps running either way while the session is active). */
@@ -209,6 +277,14 @@ export interface AssistantSettings extends ClientSettings {
   speakSnapshotAnswers: boolean;
   /** Show developer diagnostics panel. */
   showDiagnostics: boolean;
+  /** Short non-speech sounds for events (capture, found, lost...). */
+  earcons: boolean;
+  /** Continuous aiming beeps in find mode (pan = left/right in the picture, pitch = up/down, rate = how centred). */
+  spatialAudio: boolean;
+  /** Vibration patterns (Android Chrome) for capture / centred / found. */
+  haptics: boolean;
+  /** Use 3D (HRTF) panning tuned for headphones instead of simple stereo panning. */
+  headphones: boolean;
 }
 
 export interface Metrics {
@@ -248,6 +324,8 @@ export interface AssistantState {
   lastEvidence: LabelEvidence | null;
   /** Latest unexpired detections (null when expired/disabled). */
   detections: ServerDetections | null;
+  /** Active find mode, or null. */
+  find: FindStatus | null;
   error: AppError | null;
   announcement: Announcement | null;
   settings: AssistantSettings;
@@ -266,6 +344,10 @@ export interface AssistantController extends Store<AssistantState> {
   /** Push-to-talk press/release. */
   setTalking(down: boolean): void;
   readLabel(): Promise<void>;
+  /** Start find mode for an item ("salt", "the red tin"). Image-relative aiming help only. */
+  find(query: string): Promise<void>;
+  stopFind(): void;
+  setTorch(on: boolean): Promise<void>;
   lookAgain(): Promise<void>;
   repeat(): void;
   sendText(text: string): Promise<void>;
