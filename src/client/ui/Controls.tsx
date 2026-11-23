@@ -12,6 +12,8 @@ export function Controls({ state, controller }: { state: AssistantState; control
   const micUsable = state.mic.status === 'active' || state.mic.status === 'muted';
   const showTalk = state.settings.pushToTalk && state.mode === 'live';
   const canSwitch = state.camera.canSwitch && state.camera.status === 'active';
+  const torchUsable = state.camera.torch.supported && state.camera.status === 'active';
+  const torchOn = torchUsable && state.camera.torch.on;
 
   return (
     <section className="controls" aria-labelledby="controls-heading">
@@ -77,6 +79,25 @@ export function Controls({ state, controller }: { state: AssistantState; control
           onClick={() => void controller.readLabel()}
         >
           <span className="btn__label">Read label</span>
+        </button>
+        <button
+          type="button"
+          className={`btn btn--toggle${torchOn ? ' is-active' : ''}`}
+          aria-pressed={torchOn}
+          disabled={!torchUsable}
+          aria-describedby={torchUsable ? undefined : 'torch-hint'}
+          onClick={() => void controller.setTorch(!torchOn)}
+        >
+          <span className="btn__label">Torch</span>
+          <span className="btn__state" id="torch-hint" aria-hidden="true">
+            {!torchUsable
+              ? state.camera.status === 'active'
+                ? 'Torch not available on this camera'
+                : 'Needs the camera on'
+              : torchOn
+                ? 'On — tap to turn off'
+                : 'Off — light for reading labels'}
+          </span>
         </button>
         <button
           type="button"

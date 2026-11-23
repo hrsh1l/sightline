@@ -5,6 +5,7 @@ import { CameraPreview } from './CameraPreview.js';
 import { Controls } from './Controls.js';
 import { ErrorBanner } from './ErrorBanner.js';
 import { EvidencePanel } from './EvidencePanel.js';
+import { FindPanel } from './FindPanel.js';
 import { BUSY_TEXT } from './labels.js';
 import { StatusBar } from './StatusBar.js';
 import { Transcript } from './Transcript.js';
@@ -55,11 +56,13 @@ export function SessionScreen({
             controller={controller}
             camera={state.camera}
             detections={state.detections}
+            find={state.find}
             show={state.settings.showPreview}
           />
         </div>
         <div className="session__panel">
           <Controls state={state} controller={controller} />
+          <FindPanel state={state} controller={controller} />
           <AskForm state={state} controller={controller} />
         </div>
       </div>

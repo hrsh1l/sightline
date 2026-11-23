@@ -5,7 +5,20 @@ const ms = (v: number | null) => (v === null || !Number.isFinite(v) ? DASH : `${
 const txt = (v: string | null | undefined) => (v ? v : DASH);
 
 /** Developer diagnostics. Plain definition list; values are text so they can be read and copied. */
-export function Diagnostics({ state }: { state: AssistantState }) {
+function detectionsText(state: AssistantState, now: number): string {
+  const d = state.detections;
+  if (!d) return DASH;
+  const age = Math.max(0, now - d.detectedAt);
+  return `${d.source ?? 'yolo'} · ${d.detections.length} · ${ms(age)} old`;
+}
+
+function findText(state: AssistantState): string {
+  const f = state.find;
+  if (!f) return DASH;
+  return `${f.state} “${f.query}” (${f.source})`;
+}
+
+export function Diagnostics({ state, now = Date.now() }: { state: AssistantState; now?: number }) {
   const m = state.metrics;
   const ec = state.mic.echoCancellation;
   const rows: Array<[string, string]> = [
@@ -25,6 +38,10 @@ export function Diagnostics({ state }: { state: AssistantState }) {
       state.camera.videoWidth > 0 && state.camera.videoHeight > 0 ? `${state.camera.videoWidth}×${state.camera.videoHeight}` : DASH,
     ],
     ['Camera device', txt(state.camera.deviceLabel)],
+    ['Camera still capture', state.camera.stillCapture ? 'Yes' : 'No'],
+    ['Torch', state.camera.torch.supported ? (state.camera.torch.on ? 'Supported, on' : 'Supported, off') : 'Not supported'],
+    ['Detections', detectionsText(state, now)],
+    ['Find', findText(state)],
     ['Audio output', state.player.contextState],
   ];
   return (

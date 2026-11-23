@@ -141,11 +141,15 @@ export function SettingsPanel({
             ]}
           />
           <Checkbox
-            label="Show object detection boxes"
+            label="Show object boxes"
             checked={s.detections && detectorAvailable}
             disabled={!detectorAvailable}
             onChange={(v) => set({ detections: v })}
-            hint={detectorAvailable ? 'Optional detector labels over the preview, image positions only.' : 'Unavailable: no object detector is configured on the server.'}
+            hint={
+              detectorAvailable
+                ? 'Green boxes around objects the detector sees over the preview, image positions only. Find always shows a box around the item it finds.'
+                : 'Unavailable: no object detector is configured on the server. Find still shows a green box around the item it finds.'
+            }
           />
           <Checkbox label="Show camera preview" checked={s.showPreview} onChange={(v) => set({ showPreview: v })} hint="The camera keeps running either way during a session." />
           <Checkbox
@@ -154,6 +158,33 @@ export function SettingsPanel({
             onChange={(v) => set({ speakSnapshotAnswers: v })}
             hint="Read snapshot-mode answers aloud with the phone’s voice."
           />
+          <fieldset className="setting-group">
+            <legend>Sound and vibration</legend>
+            <Checkbox
+              label="Event sounds"
+              checked={s.earcons}
+              onChange={(v) => set({ earcons: v })}
+              hint="Short sounds for start, photo taken, item found, item lost and errors."
+            />
+            <Checkbox
+              label="Aiming beeps in Find"
+              checked={s.spatialAudio}
+              onChange={(v) => set({ spatialAudio: v })}
+              hint="Left/right in your ears = left/right in the picture, higher pitch = higher, faster = closer to the centre."
+            />
+            <Checkbox
+              label="Vibration"
+              checked={s.haptics}
+              onChange={(v) => set({ haptics: v })}
+              hint="Vibrates when a photo is taken, when the item is centred and when it is found."
+            />
+            <Checkbox
+              label="I’m using headphones (3D sound)"
+              checked={s.headphones}
+              onChange={(v) => set({ headphones: v })}
+              hint="More natural left/right sound. Leave off when using the phone speaker."
+            />
+          </fieldset>
           <Checkbox label="Show diagnostics" checked={s.showDiagnostics} onChange={(v) => set({ showDiagnostics: v })} />
           {s.showDiagnostics && <Diagnostics state={state} />}
         </div>

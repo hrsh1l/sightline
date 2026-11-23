@@ -6,7 +6,7 @@
  * calling `setState(patch)`.
  */
 import { vi } from 'vitest';
-import type { AssistantController, AssistantState, Listener } from '../../contracts.js';
+import type { AssistantController, AssistantState, FindStatus, Listener } from '../../contracts.js';
 import type { LabelEvidence, ServerDetections } from '../../../shared/protocol.js';
 
 export function makeState(overrides: Partial<AssistantState> = {}): AssistantState {
@@ -20,6 +20,8 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       videoWidth: 0,
       videoHeight: 0,
       canSwitch: false,
+      torch: { supported: false, on: false },
+      stillCapture: false,
       message: null,
     },
     mic: { status: 'idle', level: 0, echoCancellation: null, message: null },
@@ -30,6 +32,7 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
     transcript: [],
     lastEvidence: null,
     detections: null,
+    find: null,
     error: null,
     announcement: null,
     settings: {
@@ -39,6 +42,10 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       micDuringReplies: 'barge_in',
       speakSnapshotAnswers: true,
       showDiagnostics: false,
+      earcons: true,
+      spatialAudio: true,
+      haptics: true,
+      headphones: false,
     },
     server: { configured: true, liveModel: 'fixture-live', visionModel: 'fixture-vision', detector: false, sessionId: null, timeZone: 'Europe/London' },
     metrics: {
@@ -58,7 +65,16 @@ export function liveState(overrides: Partial<AssistantState> = {}): AssistantSta
   const base = makeState();
   return makeState({
     connection: 'live',
-    camera: { ...base.camera, status: 'active', facing: 'environment', videoWidth: 1280, videoHeight: 720, canSwitch: true },
+    camera: {
+      ...base.camera,
+      status: 'active',
+      facing: 'environment',
+      videoWidth: 1280,
+      videoHeight: 720,
+      canSwitch: true,
+      torch: { supported: true, on: false },
+      stillCapture: true,
+    },
     mic: { ...base.mic, status: 'active', echoCancellation: true },
     player: { ...base.player, contextState: 'running' },
     server: { ...(base.server ?? { configured: true, liveModel: null, visionModel: null, detector: false, timeZone: 'Europe/London' }), sessionId: 'fixture-session' },
@@ -110,6 +126,18 @@ export function makeDetections(overrides: Partial<ServerDetections> = {}): Serve
   };
 }
 
+export function makeFind(overrides: Partial<FindStatus> = {}): FindStatus {
+  return {
+    query: 'salt',
+    state: 'tracking',
+    source: 'gemini',
+    target: { label: 'salt', score: 0.9, box: { x: 0.05, y: 0.05, w: 0.2, h: 0.2 } },
+    description: 'left of the picture, near the top',
+    updatedAt: Date.UTC(2026, 10, 23, 12, 0),
+    ...overrides,
+  };
+}
+
 export class FakeController implements AssistantController {
   private state: AssistantState;
   private listeners = new Set<Listener>();
@@ -139,6 +167,9 @@ export class FakeController implements AssistantController {
   setMuted = vi.fn((_muted: boolean): void => {});
   setTalking = vi.fn((_down: boolean): void => {});
   readLabel = vi.fn(async (): Promise<void> => {});
+  find = vi.fn(async (_query: string): Promise<void> => {});
+  stopFind = vi.fn((): void => {});
+  setTorch = vi.fn(async (_on: boolean): Promise<void> => {});
   lookAgain = vi.fn(async (): Promise<void> => {});
   repeat = vi.fn((): void => {});
   sendText = vi.fn(async (_text: string): Promise<void> => {});
