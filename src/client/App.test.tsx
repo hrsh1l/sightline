@@ -2,8 +2,9 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { App } from './App.js';
+import type { FindState } from '../shared/protocol.js';
 import type { AppError, AssistantState, ConnectionStatus } from './contracts.js';
-import { FakeController, liveState, makeDetections, makeEvidence, makeState } from './ui/__fixtures__/fakeController.js';
+import { FakeController, liveState, makeDetections, makeEvidence, makeFind, makeState } from './ui/__fixtures__/fakeController.js';
 
 afterEach(cleanup);
 
@@ -141,8 +142,10 @@ describe('Session controls', () => {
   });
 
   it('shows the busy indicator text', () => {
-    setup(liveState({ busy: { kind: 'reading_label', since: 1 } }));
+    const { controller } = setup(liveState({ busy: { kind: 'reading_label', since: 1 } }));
     expect(screen.getByTestId('busy').textContent).toBe('Reading label…');
+    act(() => controller.setState({ busy: { kind: 'finding', since: 2 } }));
+    expect(screen.getByTestId('busy').textContent).toBe('Finding…');
   });
 
   it('does not put aria-live anywhere except the announcer', () => {
@@ -150,6 +153,112 @@ describe('Session controls', () => {
     const live = Array.from(document.querySelectorAll('[aria-live]')).map((el) => el.getAttribute('data-testid'));
     expect(live.sort()).toEqual(['announcer-assertive', 'announcer-polite']);
     expect(document.querySelectorAll('[role="alert"], [role="status"], [role="log"]')).toHaveLength(0);
+  });
+});
+
+describe('Torch', () => {
+  it('is a toggle with aria-pressed that calls setTorch with the opposite state', () => {
+    const { controller } = setup(liveState());
+    const torch = button('Torch') as HTMLButtonElement;
+    expect(torch.disabled).toBe(false);
+    expect(torch.getAttribute('aria-pressed')).toBe('false');
+    fireEvent.click(torch);
+    expect(controller.setTorch).toHaveBeenLastCalledWith(true);
+    act(() => controller.setState({ camera: { ...controller.getState().camera, torch: { supported: true, on: true } } }));
+    expect(button('Torch').getAttribute('aria-pressed')).toBe('true');
+    expect(button('Torch').textContent).toContain('On — tap to turn off');
+    fireEvent.click(button('Torch'));
+    expect(controller.setTorch).toHaveBeenLastCalledWith(false);
+  });
+
+  it('is disabled with a reason when the camera has no torch', () => {
+    const s = liveState();
+    const { controller } = setup({ ...s, camera: { ...s.camera, torch: { supported: false, on: false } } });
+    const torch = button('Torch') as HTMLButtonElement;
+    expect(torch.disabled).toBe(true);
+    expect(torch.getAttribute('aria-pressed')).toBe('false');
+    expect(document.getElementById(torch.getAttribute('aria-describedby') ?? '')?.textContent).toBe(
+      'Torch not available on this camera',
+    );
+    fireEvent.click(torch);
+    expect(controller.setTorch).not.toHaveBeenCalled();
+  });
+});
+
+describe('Find', () => {
+  const findInput = () => screen.getByLabelText('What should I find?') as HTMLInputElement;
+
+  it('submits the trimmed query, clears the field and ignores empty input', () => {
+    const { controller } = setup(liveState());
+    fireEvent.click(button('Find'));
+    fireEvent.change(findInput(), { target: { value: '   ' } });
+    fireEvent.submit(findInput().closest('form')!);
+    expect(controller.find).not.toHaveBeenCalled();
+    fireEvent.change(findInput(), { target: { value: '  the red tin  ' } });
+    fireEvent.click(button('Find'));
+    expect(controller.find).toHaveBeenCalledTimes(1);
+    expect(controller.find).toHaveBeenCalledWith('the red tin');
+    expect(findInput().value).toBe('');
+  });
+
+  it('explains the aiming beeps in image-relative terms and limits the query length', () => {
+    setup(liveState());
+    const input = findInput();
+    const help = document.getElementById(input.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+    expect(help).toContain('left/right in your ears = left/right in the picture');
+    expect(help).toContain('higher pitch = higher in the picture');
+    expect(help).toContain('faster = closer to the centre');
+    expect(help).toContain('Headphones work best.');
+    expect(input.maxLength).toBe(80);
+  });
+
+  it('is disabled until connected', () => {
+    const { controller } = setup(liveState({ connection: 'connecting' }));
+    expect((button('Find') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.change(findInput(), { target: { value: 'salt' } });
+    fireEvent.submit(findInput().closest('form')!);
+    expect(controller.find).not.toHaveBeenCalled();
+  });
+
+  it('Stop finding calls stopFind', () => {
+    const { controller } = setup(liveState({ find: makeFind({ state: 'searching' }) }));
+    fireEvent.click(button('Stop finding'));
+    expect(controller.stopFind).toHaveBeenCalledTimes(1);
+  });
+
+  const expected: Record<FindState, { text: string; stop: boolean }> = {
+    searching: { text: 'Searching for “salt”…', stop: true },
+    tracking: { text: '“salt” is left of the picture, near the top', stop: true },
+    centered: { text: '“salt” centred in the picture', stop: true },
+    lost: { text: 'Lost “salt” — move the camera slowly', stop: true },
+    not_found: { text: 'Not found: “salt” — try moving the camera slowly or a different name', stop: true },
+    stopped: { text: 'Stopped finding “salt”', stop: false },
+    timeout: { text: 'Stopped finding “salt” after 90 seconds', stop: false },
+  };
+
+  it.each(Object.keys(expected) as FindState[])('state %s is shown in words with a shape, never distances', (state) => {
+    setup(liveState({ find: makeFind({ state }) }));
+    const status = screen.getByTestId('find-status');
+    expect(status.textContent).toBe(expected[state].text + (expected[state].stop ? 'Stop finding' : ''));
+    expect(status.querySelector(`svg[aria-hidden="true"][data-state="${state}"]`)).not.toBeNull();
+    expect(status.getAttribute('aria-live')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Stop finding' }) !== null).toBe(expected[state].stop);
+    expect(status.textContent).not.toMatch(/\b(metres?|meters?|feet|steps?|walk|ahead|behind)\b/i);
+  });
+
+  it('tracking falls back to a position computed from the box when there is no description', () => {
+    setup(
+      liveState({
+        find: makeFind({ state: 'tracking', description: null, target: { label: 'salt', score: 0.9, box: { x: 0.7, y: 0.7, w: 0.2, h: 0.2 } } }),
+      }),
+    );
+    expect(screen.getByTestId('find-status').textContent).toContain('“salt” is right of the picture, near the bottom');
+  });
+
+  it('has no find status when find is null', () => {
+    setup(liveState());
+    expect(screen.queryByTestId('find-status')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Stop finding' })).toBeNull();
   });
 });
 
@@ -412,6 +521,31 @@ describe('Camera preview and detections', () => {
     expect(screen.queryByTestId('detection-summary')).toBeNull();
     expect(screen.queryByTestId('detection-overlay')).toBeNull();
   });
+
+  it('summary puts the find target first and leaves it out of the detector list', () => {
+    const base = makeDetections();
+    setup(
+      liveState({
+        detections: makeDetections({
+          source: 'gemini',
+          detections: [...base.detections, { label: 'salt', score: 0.9, box: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }, target: true }],
+        }),
+        find: makeFind({ state: 'centered' }),
+      }),
+    );
+    expect(screen.getByTestId('detection-summary').textContent).toBe(
+      'Finding salt: centred in the picture. Detector sees: bottle (82%), cup (61%) — image positions only',
+    );
+  });
+
+  it('summary describes find progress even with no detections', () => {
+    const { controller } = setup(liveState({ find: makeFind({ state: 'searching' }) }));
+    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding salt: searching');
+    act(() => controller.setState({ find: makeFind({ state: 'tracking' }) }));
+    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding salt: left of the picture, near the top');
+    act(() => controller.setState({ find: makeFind({ state: 'stopped' }) }));
+    expect(screen.queryByTestId('detection-summary')).toBeNull();
+  });
 });
 
 describe('Evidence in the session', () => {
@@ -437,9 +571,51 @@ describe('Settings and diagnostics', () => {
 
   it('disables detections with an explanation when the server has no detector', () => {
     setup(liveState());
-    const box = screen.getByLabelText('Show object detection boxes') as HTMLInputElement;
+    const box = screen.getByLabelText('Show object boxes') as HTMLInputElement;
     expect(box.disabled).toBe(true);
-    expect(document.getElementById(box.getAttribute('aria-describedby') ?? '')?.textContent).toContain('no object detector');
+    const hint = document.getElementById(box.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
+    expect(hint).toContain('no object detector');
+    expect(hint).toContain('Find still shows a green box');
+  });
+
+  it('enables object boxes when the server has a detector', () => {
+    const s = liveState();
+    const { controller } = setup({ ...s, server: { ...s.server!, detector: true } });
+    const box = screen.getByLabelText('Show object boxes') as HTMLInputElement;
+    expect(box.disabled).toBe(false);
+    fireEvent.click(box);
+    expect(controller.updateSettings).toHaveBeenCalledWith({ detections: true });
+  });
+
+  it('sound and vibration settings are grouped and call updateSettings with the right keys', () => {
+    const { controller } = setup(liveState());
+    const group = screen.getByRole('group', { name: 'Sound and vibration' });
+    const cases: Array<[string, Record<string, boolean>]> = [
+      ['Event sounds', { earcons: false }],
+      ['Aiming beeps in Find', { spatialAudio: false }],
+      ['Vibration', { haptics: false }],
+      ['I’m using headphones (3D sound)', { headphones: true }],
+    ];
+    for (const [label, patch] of cases) {
+      fireEvent.click(within(group).getByLabelText(label));
+      expect(controller.updateSettings).toHaveBeenLastCalledWith(patch);
+    }
+    expect(controller.updateSettings).toHaveBeenCalledTimes(4);
+  });
+
+  it('diagnostics show still capture, torch, detections and find state', () => {
+    const s = liveState();
+    setup({
+      ...s,
+      settings: { ...s.settings, showDiagnostics: true },
+      detections: makeDetections({ source: 'gemini' }),
+      find: makeFind({ state: 'centered' }),
+    });
+    const text = screen.getByTestId('diagnostics').textContent ?? '';
+    expect(text).toContain('Camera still captureYes');
+    expect(text).toContain('TorchSupported, off');
+    expect(text).toMatch(/Detectionsgemini · 2 · \d+ ms old/);
+    expect(text).toContain('Findcentered “salt” (gemini)');
   });
 
   it('shows diagnostics with units and dashes for missing values', () => {

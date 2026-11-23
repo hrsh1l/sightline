@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { AssistantController, CameraState } from '../contracts.js';
+import type { AssistantController, CameraState, FindStatus } from '../contracts.js';
 import type { ServerDetections } from '../../shared/protocol.js';
-import { DetectionOverlay, DetectionSummary } from './DetectionOverlay.js';
+import { DetectionOverlay, DetectionSummary, overlayItems, overlaySource } from './DetectionOverlay.js';
 import type { Size } from './overlayGeometry.js';
 
 /**
@@ -13,11 +13,13 @@ export function CameraPreview({
   controller,
   camera,
   detections,
+  find,
   show,
 }: {
   controller: AssistantController;
   camera: CameraState;
   detections: ServerDetections | null;
+  find: FindStatus | null;
   show: boolean;
 }) {
   const [videoEl, setVideoEl] = useState<HTMLVideoElement | null>(null);
@@ -55,16 +57,18 @@ export function CameraPreview({
       ? { width: camera.videoWidth, height: camera.videoHeight }
       : { width: detections?.sourceWidth ?? 0, height: detections?.sourceHeight ?? 0 };
 
+  const items = overlayItems(detections, find);
+
   return (
     <>
       <div className={show ? 'preview' : 'preview preview--collapsed'} aria-hidden="true" data-testid="preview">
         <video ref={videoRef} className="preview__video" playsInline muted autoPlay disablePictureInPicture />
-        {show && detections && detections.detections.length > 0 && (
-          <DetectionOverlay detections={detections} source={source} element={elementSize} />
+        {show && items.length > 0 && (
+          <DetectionOverlay items={items} source={overlaySource(detections, find)} sourceSize={source} element={elementSize} />
         )}
         {show && camera.status !== 'active' && <p className="preview__placeholder">Camera off</p>}
       </div>
-      <DetectionSummary detections={detections} />
+      <DetectionSummary detections={detections} find={find} />
     </>
   );
 }

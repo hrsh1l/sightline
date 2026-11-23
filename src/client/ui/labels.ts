@@ -7,10 +7,21 @@ import type {
   BusyKind,
   CameraState,
   ConnectionStatus,
+  FindStatus,
   MicState,
   TranscriptEntry,
 } from '../contracts.js';
-import type { DateEvidence, DateInterpretation, DateLabelType, ImageIssue, LabelEvidence, TextSection } from '../../shared/protocol.js';
+import {
+  LIMITS,
+  type DateEvidence,
+  type DateInterpretation,
+  type DateLabelType,
+  type FindState,
+  type ImageIssue,
+  type LabelEvidence,
+  type NormalizedBox,
+  type TextSection,
+} from '../../shared/protocol.js';
 
 /** Tone drives the icon shape (and colour as a secondary cue). */
 export type Tone = 'ok' | 'progress' | 'warn' | 'error' | 'off';
@@ -89,6 +100,84 @@ export const BUSY_TEXT: Record<BusyKind, string> = {
   reading_label: 'Reading label…',
   looking: 'Looking again…',
   answering: 'Answering…',
+  finding: 'Finding…',
+};
+
+// ---------------------------------------------------------------------------
+// Find mode. Positions are IMAGE-RELATIVE (where the item is in the camera picture), never distances or
+// walking directions: the app only knows the picture.
+// ---------------------------------------------------------------------------
+
+/** Find states that still need a Stop button (the search is running). */
+export const FIND_RUNNING: ReadonlySet<FindState> = new Set<FindState>(['searching', 'tracking', 'centered', 'lost', 'not_found']);
+
+export function isFindRunning(find: FindStatus | null): find is FindStatus {
+  return !!find && FIND_RUNNING.has(find.state);
+}
+
+/** "left of the picture, near the top" from a normalised box (box centre thirds-ish, with a wide middle). */
+export function describeBoxPosition(box: NormalizedBox): string {
+  const cx = box.x + box.w / 2;
+  const cy = box.y + box.h / 2;
+  const h = cx < 0.4 ? 'left' : cx > 0.6 ? 'right' : 'middle';
+  const v = cy < 0.4 ? 'top' : cy > 0.6 ? 'bottom' : 'middle';
+  if (h === 'middle' && v === 'middle') return 'near the centre of the picture';
+  if (h === 'middle') return `in the middle of the picture, near the ${v}`;
+  if (v === 'middle') return `${h} of the picture, at mid-height`;
+  return `${h} of the picture, near the ${v}`;
+}
+
+/** Where the target is in the picture: the server's description first, else computed from the box. */
+export function findWhere(find: FindStatus): string {
+  const d = find.description?.trim();
+  if (d) return d;
+  if (find.target) return describeBoxPosition(find.target.box);
+  return 'in the picture';
+}
+
+const findTimeoutSeconds = Math.round(LIMITS.findTimeoutMs / 1000);
+
+/** The prominent status line in the Find section. */
+export function findStatusText(find: FindStatus): string {
+  const q = `“${find.query}”`;
+  switch (find.state) {
+    case 'searching':
+      return `Searching for ${q}…`;
+    case 'tracking':
+      return `${q} is ${findWhere(find)}`;
+    case 'centered':
+      return `${q} centred in the picture`;
+    case 'lost':
+      return `Lost ${q} — move the camera slowly`;
+    case 'not_found':
+      return `Not found: ${q} — try moving the camera slowly or a different name`;
+    case 'stopped':
+      return `Stopped finding ${q}`;
+    case 'timeout':
+      return `Stopped finding ${q} after ${findTimeoutSeconds} seconds`;
+  }
+}
+
+/** First sentence of the (visually hidden) overlay summary. */
+export function findSummaryText(find: FindStatus): string {
+  const where =
+    find.state === 'centered'
+      ? 'centred in the picture'
+      : find.state === 'tracking'
+        ? findWhere(find)
+        : find.state === 'searching'
+          ? 'searching'
+          : find.state === 'lost'
+            ? 'lost — move the camera slowly'
+            : find.state === 'not_found'
+              ? 'not found'
+              : 'stopped';
+  return `Finding ${find.query}: ${where}`;
+}
+
+export const DETECTION_SOURCE_TEXT: Record<'yolo' | 'gemini', string> = {
+  yolo: 'YOLO · generic objects',
+  gemini: 'Gemini · searched item',
 };
 
 export const ROLE_TEXT: Record<TranscriptEntry['role'], string> = {
