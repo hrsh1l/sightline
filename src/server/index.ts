@@ -213,6 +213,9 @@ export async function startServer(config: AppConfig = loadConfig()) {
     accessGate: config.accessToken !== null,
     mode: config.production ? 'production' : 'development',
   });
+  if (detector.enabled) {
+    void detector.health().then((h) => log.info('detector_health', { status: h, model: detector.model }));
+  }
   if (!config.geminiApiKey) {
     log.warn('missing_credentials', { hint: 'Set GEMINI_API_KEY in .env (see .env.example). UI and tests still run.' });
   }
