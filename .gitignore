@@ -1,0 +1,23 @@
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+*.log
+.DS_Store
+# local secrets
+.env
+.env.*
+!.env.example
+# python / model weights
+services/detector/.venv/
+services/detector/models/
+*.pt
+*.onnx
+__pycache__/
+# recordings never committed
+recordings/
+*.webm
+*.wav
+# archives
+sightline-source*.zip

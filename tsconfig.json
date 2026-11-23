@@ -1,0 +1,6 @@
+{
+  "files": [],
+  "references": [],
+  "compilerOptions": { "composite": false },
+  "//": "Editor convenience only. Real checks: tsconfig.client.json, tsconfig.server.json, tsconfig.test.json"
+}
