@@ -12,6 +12,7 @@
  * Nothing is rotated: the client already encodes frames upright and un-mirrored.
  */
 import sharp from 'sharp';
+import { servingSchema } from './servingSchema.js';
 
 type SharpPipeline = ReturnType<typeof sharp>;
 
@@ -71,7 +72,7 @@ const box2dSchema = {
 } as const;
 
 /** Pass-1 structured output. */
-export const REGION_RESPONSE_SCHEMA = {
+export const REGION_RESPONSE_SCHEMA = servingSchema({
   type: 'object',
   properties: {
     regions: {
@@ -88,7 +89,7 @@ export const REGION_RESPONSE_SCHEMA = {
     },
   },
   required: ['regions'],
-} as const;
+} as const);
 
 /** Gemini box in its native convention: 0..1000, relative to the image. */
 export interface Box2d {

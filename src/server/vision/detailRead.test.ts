@@ -357,8 +357,15 @@ describe('extractLabel model fallback (vision model -> fast model, once)', () =>
     expect(calls.map((c) => c.model)).toEqual(['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.5-flash-lite']);
   });
 
-  it('does not retry on 429, 400 or 401', async () => {
-    for (const err of [new ApiError({ status: 429, message: 'quota' }), new ApiError({ status: 400, message: 'bad' }), new ApiError({ status: 401, message: 'key' })]) {
+  it('retries once on the fast model after a 429 (separate per-model quota)', async () => {
+    const { ai, calls } = fakeAi([fixtureRegions(), new ApiError({ status: 429, message: 'quota' }), new ApiError({ status: 429, message: 'quota' })]);
+    await expect(createGeminiVision({ ai, config, log: createMemoryLogger() }).extractLabel({ frame: photo, now: NOW })).rejects.toMatchObject({ code: 'quota_exceeded' });
+    expect(calls).toHaveLength(3);
+    expect(calls[2]!.model).toBe(config.locateModel);
+  });
+
+  it('does not retry on 400 or 401', async () => {
+    for (const err of [new ApiError({ status: 400, message: 'bad' }), new ApiError({ status: 401, message: 'key' })]) {
       const { ai, calls } = fakeAi([fixtureRegions(), err]);
       await expect(createGeminiVision({ ai, config, log: createMemoryLogger() }).extractLabel({ frame: photo, now: NOW })).rejects.toBeInstanceOf(VisionError);
       expect(calls).toHaveLength(2);
@@ -404,11 +411,11 @@ describe('answer model fallback', () => {
     expect(log.events.find((e) => e.event === 'vision_answer')!.fields).toMatchObject({ model: 'gemini-3.5-flash-lite' });
   });
 
-  it('does not retry on quota errors', async () => {
-    const { ai, calls } = fakeAi([new ApiError({ status: 429, message: 'quota' })]);
+  it('falls back to the fast model on quota errors and reports the original error if that fails too', async () => {
+    const { ai, calls } = fakeAi([new ApiError({ status: 429, message: 'quota' }), new ApiError({ status: 429, message: 'quota' })]);
     await expect(createGeminiVision({ ai, config, log: createMemoryLogger() }).answer({ frame: frame(), question: 'q', history: [], now: NOW })).rejects.toMatchObject({
       code: 'quota_exceeded',
     });
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
   });
 });

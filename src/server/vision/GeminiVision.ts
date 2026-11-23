@@ -55,6 +55,7 @@ import {
   buildRegionInstruction,
   buildRegionUserText,
 } from './prompts.js';
+import { servingSchema } from './servingSchema.js';
 
 /** Minimal structural view of GoogleGenAI used here, so tests can inject a FIXTURE fake. */
 export interface GenerateContentClient {
@@ -164,7 +165,7 @@ const MAX_OUTPUT_TOKENS = {
 
 const nullableString = (description: string) => ({ type: ['string', 'null'], description });
 
-export const EXTRACTION_RESPONSE_SCHEMA = {
+export const EXTRACTION_RESPONSE_SCHEMA = servingSchema({
   type: 'object',
   properties: {
     readability: { type: 'string', enum: ['clear', 'partial', 'unreadable'] },
@@ -211,7 +212,7 @@ export const EXTRACTION_RESPONSE_SCHEMA = {
     suggestion: nullableString('At most one concrete camera adjustment; null if none needed.'),
   },
   required: ['readability', 'exactText', 'instructions', 'dates', 'batchCodes', 'itemGuess', 'issues', 'suggestion'],
-} as const;
+} as const);
 
 /** Structural validation of the model's JSON. Enum values are mapped leniently afterwards. */
 const ModelExtraction = z.object({
@@ -395,7 +396,8 @@ interface ExtractMeta {
 }
 
 /** Transient provider failures (timeout, 5xx, unreachable, model missing) worth one retry on the fallback model. */
-const RETRYABLE_STATUS = new Set([404, 500, 502, 503, 504]);
+// 429 included: per-model quotas are separate, so the fast model often still has quota when the main one is exhausted (seen live 2026-11-23).
+const RETRYABLE_STATUS = new Set([404, 429, 500, 502, 503, 504]);
 
 export function createGeminiVision(deps: {
   ai: GenerateContentClient;

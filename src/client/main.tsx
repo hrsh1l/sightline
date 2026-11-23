@@ -7,6 +7,7 @@ import { createCameraController, createFrameSampler } from './camera/index.js';
 import { createMicCapture } from './audio/MicCapture.js';
 import { createAudioPlayer } from './audio/AudioPlayer.js';
 import { createSpeechOutput } from './audio/SpeechOutput.js';
+import { createSpatialCues } from './audio/SpatialCues.js';
 import { createSessionSocket } from './session/SessionSocket.js';
 import { createAssistantController } from './session/AssistantController.js';
 
@@ -22,6 +23,16 @@ const controller = createAssistantController({
   mic: createMicCapture(),
   player: createAudioPlayer(),
   speech: createSpeechOutput(),
+  // Earcons, find-mode aiming beeps and haptics.
+  spatial: createSpatialCues(),
+  // Small frames (<= 640 px, <= 4 FPS) for the object detector / find tracking only; never sent to Gemini Live.
+  createDetectSampler: (camera) =>
+    createFrameSampler(camera, {
+      intervalMs: LIMITS.detectFrameMinIntervalMs,
+      minIntervalMs: LIMITS.detectFrameMinIntervalMs,
+      maxDim: LIMITS.detectFrameMaxDim,
+      jpegQuality: LIMITS.detectFrameJpegQuality,
+    }),
   createSocket: () => createSessionSocket(),
 });
 

@@ -56,7 +56,7 @@ export const frame = (over: Partial<CapturedFrame> = {}): CapturedFrame => ({
 });
 
 export function fakeCamera() {
-  const s = store<CameraState>({ status: 'idle', facing: 'environment', deviceLabel: '', videoWidth: 0, videoHeight: 0, canSwitch: false, message: null });
+  const s = store<CameraState>({ status: 'idle', facing: 'environment', deviceLabel: '', videoWidth: 0, videoHeight: 0, canSwitch: false, message: null, torch: { supported: false, on: false }, stillCapture: false });
   let captureImpl: (o: CaptureOptions) => Promise<CapturedFrame | null> = () => Promise.resolve(frame());
   const cam = {
     ...s,
@@ -69,6 +69,9 @@ export function fakeCamera() {
     pause: vi.fn(() => s.set({ status: 'paused' })),
     resume: vi.fn(async () => s.set({ status: 'active' })),
     capture: vi.fn((o: CaptureOptions) => captureImpl(o)),
+    // FIXTURE: no still-photo path; the controller must fall back to capture().
+    captureStill: vi.fn(async (_o: CaptureOptions & { bestOf?: number }): Promise<CapturedFrame | null> => null),
+    setTorch: vi.fn(async (_on: boolean) => false),
     setCapture: (fn: typeof captureImpl) => (captureImpl = fn),
   };
   return cam satisfies CameraController;

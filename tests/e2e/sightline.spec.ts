@@ -109,7 +109,8 @@ test.describe('FIXTURE e2e: phone portrait viewport (384x832, emulated)', () => 
     const call = st.vision.extractCalls[visionBefore]!;
     expect(call).toBeDefined();
     expect(Math.abs(call.capturedAt - pressedAt)).toBeLessThan(2_500); // fresh capture, not an old ambient frame
-    expect(Math.max(call.width, call.height)).toBeLessThanOrEqual(1_600);
+    // Detail still (ImageCapture.takePhoto or sharpest frame), capped at LIMITS.detailMaxDim (4096).
+    expect(Math.max(call.width, call.height)).toBeLessThanOrEqual(4_096);
     expect(Math.max(call.width, call.height)).toBeGreaterThan(0);
     const sAfterRead = await sessionByIndex(idx);
     expect(sAfterRead.clientContent.some((c) => c.includes('the user pressed Read label'))).toBe(true);

@@ -37,6 +37,7 @@ export function fixtureEvidence(frame: Pick<FramePayload, 'frameId' | 'capturedA
 export interface FixtureVision extends VisionService {
   extractCalls: { frame: FramePayload; focus?: string | undefined }[];
   answerCalls: { frame: FramePayload; question: string }[];
+  locateCalls: { frame: FramePayload; query: string }[];
   /** Make the next calls throw (e.g. a VisionError). */
   failWith: unknown;
 }
@@ -46,6 +47,7 @@ export function createFixtureVision(): FixtureVision {
     model: FIXTURE_VISION_MODEL,
     extractCalls: [],
     answerCalls: [],
+    locateCalls: [],
     failWith: null,
     async extractLabel({ frame, focus }) {
       v.extractCalls.push({ frame, focus });
@@ -56,6 +58,12 @@ export function createFixtureVision(): FixtureVision {
       v.answerCalls.push({ frame, question });
       if (v.failWith) throw v.failWith;
       return { text: FIXTURE_ANSWER, latencyMs: 7 };
+    },
+    /** FIXTURE: one fixed centred box labelled with the query. */
+    async locate({ frame, query }) {
+      v.locateCalls.push({ frame, query });
+      if (v.failWith) throw v.failWith;
+      return { boxes: [{ label: `FIXTURE ${query}`, box: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }, score: 0.9 }], model: FIXTURE_VISION_MODEL, latencyMs: 5 };
     },
   };
   return v;

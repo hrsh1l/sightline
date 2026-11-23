@@ -53,7 +53,7 @@ describe('(a) stale / out-of-order detection results', () => {
   it('expires relative to capture time, not arrival time', async () => {
     const h = await started();
     h.controller.updateSettings({ detections: true });
-    h.socket.receive(det(1, Date.now() - 2_000)); // 500 ms of TTL left
+    h.socket.receive(det(1, Date.now() - (LIMITS.detectionTtlMs - 500))); // 500 ms of TTL left
     expect(h.controller.getState().detections).not.toBeNull();
     await vi.advanceTimersByTimeAsync(499);
     expect(h.controller.getState().detections).not.toBeNull();
@@ -338,7 +338,9 @@ describe('(e) fallback transitions', () => {
     const slow = deferred<CapturedFrame | null>();
     h.camera.setCapture(() => slow.promise);
     const reading = h.controller.readLabel();
-    expect(h.camera.capture).toHaveBeenLastCalledWith({ maxDim: LIMITS.snapshotMaxDim, jpegQuality: LIMITS.snapshotJpegQuality });
+    // Full-resolution still first (FIXTURE camera has none -> null), then the normal high-res capture.
+    expect(h.camera.captureStill).toHaveBeenCalledWith({ maxDim: LIMITS.detailMaxDim, jpegQuality: LIMITS.detailJpegQuality, bestOf: LIMITS.detailBestOf });
+    await vi.waitFor(() => expect(h.camera.capture).toHaveBeenLastCalledWith({ maxDim: LIMITS.snapshotMaxDim, jpegQuality: LIMITS.snapshotJpegQuality }));
     slow.resolve(frame());
     await reading;
     const action = h.socket.sent.at(-1);

@@ -6,6 +6,7 @@
  */
 import { NormalizedBox } from '../../shared/protocol.js';
 import { parseBox2d } from './detailRead.js';
+import { servingSchema } from './servingSchema.js';
 
 export const LOCATE = {
   maxBoxes: 5,
@@ -18,7 +19,7 @@ export const LOCATE = {
   maxOutputTokens: 2_048,
 } as const;
 
-export const LOCATE_RESPONSE_SCHEMA = {
+export const LOCATE_RESPONSE_SCHEMA = servingSchema({
   type: 'object',
   properties: {
     found: {
@@ -43,7 +44,7 @@ export const LOCATE_RESPONSE_SCHEMA = {
     },
   },
   required: ['found'],
-} as const;
+} as const);
 
 export interface LocatedBox {
   label: string;
