@@ -1,0 +1,162 @@
+# Sightline test results
+
+Date of run: **2026-11-23**. Machine: macOS (Darwin 27.2.0, arm64), the verification worker's git worktree based on
+integration commit `620a037`.
+
+Versions: Node `v26.5.1` (repo requires ≥ 22.12), TypeScript 6.0.3, Vitest 5.1.1, Playwright 1.65.1 with
+Chrome Headless Shell **159.0.8154.6** (Playwright build `chromium-headless-shell v1255`).
+
+The five sections below are deliberately separate. Only sections 1–3 were run. **FIXTURE** means a scripted
+fake in the test code (`tests/fixtures/`, `src/**/__fixtures__`, fakes inside `*.test.ts`). Fixture results show
+that the code plumbing works; they say nothing about how the real Gemini models behave or how the app runs on
+the phone.
+
+## Static checks and build (all passed)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | passed (client, server and test tsconfigs; includes `tests/**` and `playwright.config.ts`) |
+| `npm run lint` | passed, 0 problems |
+| `npm run build` | passed (`dist/client`: index.html, CSS, main JS 381 kB / 116 kB gzip, separate mic worklet file) |
+| `npm run check:secrets` | passed: "scanned 4 client build files; no secrets or direct provider endpoints found" |
+
+## 1. Automated unit tests
+
+Command: `npx vitest run` (unit and integration run together: **23 files, 444 tests, all passed**). Section 2
+breaks out the integration files. Unit share: **21 files, 417 tests**.
+
+- Pre-existing worker tests: 18 files, 322 tests (camera, audio, session controller, socket, UI/RTL, server
+  session with FIXTURE Live connector, Live bridge, vision with FIXTURE `ai`, dates, detector, security).
+- New in this verification pass (`tests/unit/`, 95 tests):
+  - `tests/unit/protocol.test.ts` (69): every `ClientMessage` and `ServerMessage` variant accepted from a
+    valid fixture (checked against the union's own variant list, so a new message type without a fixture
+    fails), and 40 invalid cases rejected: oversize audio/frames/text, `data:` prefixes, bad mime, unknown
+    types/actions/tools/codes, out-of-range boxes, too many detections. Also checks that a max-size frame fits
+    under the WebSocket payload cap and that the health payload has no field that could carry a secret.
+  - `tests/unit/controller.coverage.test.ts` (21, jsdom, FIXTURE camera/mic/player/socket): detection TTL and
+    ordering edge cases; frames never queued during reconnect; mic denied / both denied / camera disconnected
+    mid-session / camera denied → `snapshot.unavailable camera_denied`; retry after allowing the camera; late
+    transcript of an interrupted turn dropped; turn rejection across reconnects; end() during pending reconnect
+    and pending permission prompts; **regression for bug 1 below**; live → snapshot fallback (connect failure
+    and mid-session loss); snapshot TTS + Stop speaking; explicit Read label capture freshness.
+  - `tests/unit/ui.coverage.test.tsx` (5, jsdom, FIXTURE controller): disconnected camera, mic denied and camera
+    in-use messaging; fallback banner with the provider message; missing-credentials Start screen.
+
+## 2. Integration tests with FIXTURE providers against the real server
+
+Command: `npx vitest run tests/integration` — **2 files, 27 tests, all passed** (about 6 s).
+
+The **real** `startServer()` from `src/server/index.ts` is started on a free port, with a **FIXTURE** Live
+connector (`tests/fixtures/fixtureLive.ts`: records every `sendRealtimeInput` / `sendClientContent` /
+`sendToolResponse` / `close`, emits `setupComplete`, audio parts, transcriptions, `interrupted`, `turnComplete`,
+`toolCall`, `toolCallCancellation`, `goAway`, `sessionResumptionUpdate`, provider closes) and **FIXTURE** vision
+(`tests/fixtures/fixtureVision.ts`). The client is a real `ws` WebSocket sending an `Origin` header.
+
+`tests/integration/server.test.ts` (24), development mode:
+- `/api/health` matches the contract, `Cache-Control: no-store`, no key or secret-like field; security headers.
+- Non-localhost `Host` refused (HTTP 403, WS 403) without `ACCESS_TOKEN`; with a token: `/?access=` sets an
+  HttpOnly, SameSite=Strict HMAC cookie (not the token) and redirects; cookie then allows HTTP and WS; WS without
+  the cookie → 401.
+- Cross-origin and missing-Origin WebSockets → 403; first message must be `hello` (close 1008).
+- hello → status connecting/live → ready; mic audio forwarded with `audio/pcm;rate=16000`, frames as
+  `image/jpeg`; **1 FPS guard** (frames every 200 ms for 3 s → 3–4 forwarded, gaps ≥ 900 ms); stale (old
+  `capturedAt`) and out-of-order (lower `frameId`) frames dropped.
+- `interrupted` → `turn interrupted`; later audio/transcript of that turn discarded; next turn flows.
+  `playback.stop` → `turn cancelled`, remaining audio discarded.
+- `read_label` tool round trip: toolCall → `snapshot.request` (maxDim 1600) → `snapshot.result` → FIXTURE vision
+  → `evidence` → `sendToolResponse` with the same call id containing dates and batch codes.
+  `toolCallCancellation` → tool cancelled, a late `snapshot.result` gets no tool response.
+- Read label button: evidence → ordered client content to Live; stale frame → `frame_stale`.
+- goAway → reconnect with the resumption handle; old provider session closed; media flows only to the new one.
+- Invalid messages after hello (bad JSON, `data:` prefix, unknown type) → recoverable `invalid_message`.
+- `bye` → close 1000, provider session closed, provider messages afterwards trigger nothing, no sends after
+  close, `session_disposed reason=bye`. Abrupt close disposes too. Message larger than `maxPayload` → close 1009
+  and disposal.
+- Connect failure (404) → `model_unavailable` with `fallback: snapshot` (raw provider text not forwarded) →
+  `ready(snapshot)` → typed question answered by FIXTURE vision; missing frame → `frame_missing`.
+  Unauthorized without vision → non-recoverable, `fallback: none`, status closed.
+- Missing credentials: health `configured:false`; `ready(snapshot, nothing available)` + exact
+  `missing_credentials` message; later questions get the same error and never an answer or evidence.
+- `MAX_CONCURRENT_SESSIONS=1` → second socket 503, slot frees after close.
+
+`tests/integration/production.test.ts` (3), `NODE_ENV=production`, needs `dist/client` (built by
+`npm run build`; if missing, the file reports one skipped test instead): serves `index.html` for `/` and SPA
+routes (**regression for bug 2**), strict CSP, hashed asset served with no key-like string, WS hello → ready.
+
+## 3. Desktop browser e2e with Chromium fake media + FIXTURE providers
+
+Command: `npx playwright test` — **9 tests, all passed**, run twice in a row with the same result (about 23 s
+each). Not flaky in those two runs.
+
+Setup: `playwright.config.ts` builds the client (`vite build`) and starts `tests/e2e/fixture-server.ts`
+(real `startServer`, production mode, FIXTURE Live + FIXTURE vision on port 3101, a no-credentials server on
+3102, and a test-only control/stats API on 127.0.0.1:3109). Chromium runs headless with
+`--use-fake-ui-for-media-stream --use-fake-device-for-media-stream` (fake test-pattern camera, fake beep
+microphone). It does **not** use `--autoplay-policy`: audio is unlocked by a real click on Start. Phone emulation:
+384×832, `isMobile`, `hasTouch`, deviceScaleFactor 3.
+
+Scenarios (`tests/e2e/sightline.spec.ts`):
+1. Start screen shows purpose and privacy text; no media requested before the tap.
+2. Full live session: status Live, camera and mic on; frames reach the FIXTURE provider at ≤ 1 FPS (2–5 in 4 s,
+   gaps ≥ 900 ms); audio arrives only as `audio/pcm;rate=16000`; FIXTURE reply transcript appears; **Stop
+   speaking** silences a 6 s FIXTURE reply and it stays silent while the FIXTURE keeps streaming that turn (server
+   `audioOutDiscarded > 0`); **Mute** sets `aria-pressed=true`, audio forwarding stops (count unchanged over 2 s,
+   `audioStreamEnd` sent) and resumes on unmute; **Read label** sends a fresh capture (captured within 2.5 s of
+   the press, ≤ 1600 px) to FIXTURE vision and shows exact text, dates, batch codes ("not dates") and the
+   interpretation in separate sections, and injects the evidence into Live; voice `read_label` tool round trip
+   through the page; diagnostics show Frames sent; **End session** closes the provider session, no frames/audio
+   for 3 s afterwards, every camera/mic track `ended`, `<video>.srcObject` null, `session_disposed reason=bye`.
+3. Camera permission denied (getUserMedia rejects video with `NotAllowedError`): "Denied" status, banner with
+   "set Camera to Allow" and Open settings; voice still reaches the provider and the reply appears; Read label
+   fails honestly without evidence.
+4. Missing credentials server: "Not set up yet" message, Start disabled, no transcript, all tracks released
+   (**regression for bug 1**).
+5. All buttons have an accessible name and are ≥ 44 px tall; no horizontal overflow at 384 px.
+6. 320 px wide; root font-size 200% at 384 px; 192 CSS px width (200% page-zoom equivalent); landscape 832×384
+   — no horizontal overflow (**regression for bug 3** at 200%), controls reachable.
+
+Screenshots (git-ignored) in `test-results/screenshots/`: `01-start-portrait`, `02-live-portrait-reply`,
+`03-evidence-portrait`, `04-ended-portrait`, `05-camera-denied-portrait`, `06-missing-credentials-portrait`,
+`07-start-320`, `08-session-320`, `09-session-text-200pct`, `10-session-zoom-192`, `11-session-landscape`.
+
+Limitations of this section: the fake camera has no `facingMode`, so the status reads "Camera on", not "Rear
+camera" (rear-camera selection is untested in a browser); the fake microphone is a synthetic beep, so speech
+detection, echo cancellation and barge-in from real speech are not exercised (barge-in is FIXTURE `interrupted`);
+headless Chromium's audio output is not heard by anyone; the latency metrics are not meaningful here; no
+TalkBack, no Android permission UI, no backgrounding or screen lock.
+
+## 4. Live provider tests
+
+**Not run: no GEMINI_API_KEY in this environment.** Run `npm run check:models` then the manual checklist
+([mobile-checklist.md](mobile-checklist.md)).
+
+## 5. Physical S25 tests
+
+**Not run: no device connected.** Use [mobile-checklist.md](mobile-checklist.md).
+
+## Product bugs found and fixed in this pass
+
+1. **Camera and microphone stayed on after a non-recoverable server error** (`src/client/session/AssistantController.ts`,
+   `onServerError`). With missing credentials, the UI correctly goes back to the Start screen, which has no End
+   button, but the controller left the camera, mic and socket running (camera indicator stays on; the idle socket
+   also took a `MAX_CONCURRENT_SESSIONS` slot). Fix: the shared teardown from `end()` was moved into `teardown()`;
+   a non-recoverable error now calls it (stops sampler/camera/mic/playback, says `bye`, closes the socket) and
+   then shows the error. A permission prompt that resolves later can no longer overwrite the honest error.
+   Regression: `tests/unit/controller.coverage.test.ts` (3 tests in "(d)") and e2e scenario 4.
+2. **Production build returned 404 for every page when the project path contains a dot-directory**
+   (`src/server/index.ts`, SPA fallback). `res.sendFile(absolutePath)` makes `send` refuse paths with a dot
+   segment (for example `~/.projects/…` or this `.claude/worktrees/…` checkout). Fix:
+   `res.sendFile('index.html', { root: clientDir })`. Regression: `tests/integration/production.test.ts`
+   (fails without the fix) and every e2e test.
+3. **Horizontal overflow at 200% zoom / large text** (`src/client/styles.css`, `.session__layout`). The implicit
+   grid column grew to its content's min-content width (224 px in a 192 px viewport; 410 px at 384 px with
+   200% text). Fix: `grid-template-columns: minmax(0, 1fr)` (landscape already used `minmax(0, …)`).
+   Regression: e2e scenario 6 (both failed before the fix).
+
+## Not covered by automation
+
+- Real Gemini Live / vision quality, latency, tool-choice behaviour, `goAway` timing, quota errors.
+- Real rear camera selection, switching cameras, rotation, Android backgrounding and screen lock (unit tests only).
+- Push-to-talk in a browser (unit/RTL only); object-detection overlays in a browser (unit only; YOLO service not run).
+- Session duration limit and server heartbeat timeouts (unit tests with fake timers only).
+- TalkBack and real assistive-technology announcements.

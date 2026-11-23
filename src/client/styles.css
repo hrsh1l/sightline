@@ -428,6 +428,9 @@ p {
 
 .session__layout {
   display: grid;
+  /* minmax(0, …): an implicit auto column grows to its content's min-content width and overflowed the
+     viewport at 200% zoom / large text. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
 }
 
