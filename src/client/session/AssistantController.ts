@@ -32,6 +32,7 @@ import {
   LIMITS,
   PROTOCOL_VERSION,
   type ClientMessage,
+  type FindState,
   type FramePayload,
   type LabelEvidence,
   type ServerDetections,
@@ -48,16 +49,20 @@ import type {
   CameraController,
   CapturedFrame,
   ConnectionStatus,
+  Earcon,
+  FindStatus,
   FrameSampler,
   Listener,
   Metrics,
   MicCapture,
   AudioPlayer,
+  SpatialCueEngine,
   SpeechOutput,
   TranscriptEntry,
   Unsubscribe,
 } from '../contracts.js';
 import { rmsOfPcm16Base64 } from '../audio/pcm.js';
+import { cocoMatch, toCueTarget } from '../../shared/find.js';
 import type { SessionSocketLike } from './SessionSocket.js';
 
 export type AssistantDeps = {
@@ -77,6 +82,16 @@ export type AssistantDeps = {
   reconnectDelayMs?: (attempt: number) => number;
   /** Busy indicator timeout. Default 30 s. */
   busyTimeoutMs?: number;
+  /** Earcons, aiming cues and haptics (optional: without it the app is silent apart from speech). */
+  spatial?: SpatialCueEngine;
+  /**
+   * Small fast frames for the detector / find tracking (never forwarded to Live). Runs only while live/snapshot,
+   * visible, and (detections on with a detector, or find active).
+   */
+  createDetectSampler?: (camera: CameraController) => FrameSampler;
+  /** Busy this long before the 'working' tick starts (default 1.5 s), then repeats every workingCueIntervalMs. */
+  workingCueDelayMs?: number;
+  workingCueIntervalMs?: number;
 };
 
 export const DEFAULT_SETTINGS: AssistantSettings = {
@@ -86,7 +101,17 @@ export const DEFAULT_SETTINGS: AssistantSettings = {
   micDuringReplies: 'barge_in',
   speakSnapshotAnswers: true,
   showDiagnostics: false,
+  earcons: true,
+  spatialAudio: true,
+  haptics: true,
+  headphones: false,
 };
+
+/** Do not send detect frames when this much is queued on the socket (they are the most expendable traffic). */
+export const MAX_BUFFERED_FOR_DETECT = 64 * 1024;
+/** Gemini-located boxes arrive ~1x/s, so they stay on screen a little longer than YOLO boxes. */
+export const GEMINI_DETECTION_TTL_MS = LIMITS.detectionTtlMs + LIMITS.locateMinIntervalMs;
+const TERMINAL_FIND: ReadonlySet<FindState> = new Set<FindState>(['not_found', 'stopped', 'timeout']);
 
 /** RMS (0..1) above which a 16 kHz mic chunk counts as speech for the questionEnd metric. */
 export const SPEECH_RMS_THRESHOLD = 0.02;
@@ -136,6 +161,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   const doc: Document | undefined = deps.document ?? (typeof document !== 'undefined' ? document : undefined);
   const reconnectDelay = deps.reconnectDelayMs ?? ((n: number) => Math.min(8_000, 500 * 2 ** n));
   const busyTimeoutMs = deps.busyTimeoutMs ?? 30_000;
+  const spatial = deps.spatial ?? null;
+  const workingCueDelayMs = deps.workingCueDelayMs ?? 1_500;
+  const workingCueIntervalMs = deps.workingCueIntervalMs ?? 1_200;
 
   // ---------------------------------------------------------------------------
   // Store
@@ -153,6 +181,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     transcript: [],
     lastEvidence: null,
     detections: null,
+    find: null,
     error: null,
     announcement: null,
     settings: { ...DEFAULT_SETTINGS, ...deps.initialSettings },
@@ -208,8 +237,22 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   let busyInfo: BusyInfo | null = null;
   let busyTimer: ReturnType<typeof setTimeout> | null = null;
   let detectionTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastDetections: { frameId: number; capturedAt: number } | null = null;
+  /** Newest detections shown, per source (YOLO and Gemini frames arrive out of step). */
+  const lastDetections: Partial<Record<'yolo' | 'gemini', { frameId: number; capturedAt: number }>> = {};
   let audioUnlockSettled = false;
+  // Detect sampler
+  let detectSampler: FrameSampler | null = null;
+  let detectSamplerRunning = false;
+  /** null until the user (or initialSettings) chooses; then auto-enable after ready never overrides it. */
+  let detectionsChosen: boolean | null = deps.initialSettings?.detections ?? null;
+  let sessionStartCuePlayed = false;
+  // Find mode
+  let findReqId: string | null = null;
+  let findLocal = false;
+  let findCenteredOnce = false;
+  const endedFindIds: string[] = [];
+  // Working cue
+  let workingTimer: ReturnType<typeof setTimeout> | null = null;
   // Metrics bookkeeping
   let lastSpeechAt: number | null = null;
   let lastResponseStartAt = Number.NEGATIVE_INFINITY;
@@ -232,9 +275,14 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     setState({ announcement: { id: ++announceId, text, politeness } });
   }
 
+  const cue = (kind: Earcon) => spatial?.earcon(kind);
+
   function setError(error: AppError | null, announceIt = true) {
     setState({ error });
-    if (error && announceIt) announce(error.message, 'assertive');
+    if (error && announceIt) {
+      if (error.code !== 'audio_output') cue('error');
+      announce(error.message, 'assertive');
+    }
   }
 
   function setConnection(connection: ConnectionStatus) {
@@ -243,14 +291,45 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     const text = CONNECTION_ANNOUNCEMENTS[connection];
     if (text) announce(text, connection === 'reconnecting' ? 'assertive' : 'polite');
     updateGate();
+    updateDetectSampler();
   }
+
+  const applySpatialConfig = () => {
+    const s = state.settings;
+    spatial?.configure({ earcons: s.earcons, spatial: s.spatialAudio, haptics: s.haptics, headphones: s.headphones });
+  };
+  applySpatialConfig();
 
   // ---------------------------------------------------------------------------
   // Busy
   // ---------------------------------------------------------------------------
 
+  function stopWorkingCue() {
+    if (workingTimer) clearTimeout(workingTimer);
+    workingTimer = null;
+  }
+
+  /** Gentle repeating tick while busy longer than workingCueDelayMs (not while connecting or speaking). */
+  function startWorkingCue() {
+    stopWorkingCue();
+    const ep = epoch;
+    const tick = (delay: number) => {
+      workingTimer = setTimeout(() => {
+        workingTimer = null;
+        if (!isActiveEpoch(ep) || !busyInfo || busyInfo.kind === 'connecting') return;
+        if (!state.speaking) cue('working');
+        tick(workingCueIntervalMs);
+      }, delay);
+    };
+    tick(workingCueDelayMs);
+  }
+
   function setBusy(kind: BusyKind, requestId: string | null, fromTool = false) {
     if (busyTimer) clearTimeout(busyTimer);
+    if (busyInfo?.kind !== kind) {
+      if (kind === 'connecting') stopWorkingCue();
+      else startWorkingCue();
+    }
     busyInfo = { kind, requestId, fromTool };
     setState({ busy: { kind, since: now() } });
     const ep = epoch;
@@ -266,6 +345,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   function clearBusy() {
     if (busyTimer) clearTimeout(busyTimer);
     busyTimer = null;
+    stopWorkingCue();
     busyInfo = null;
     setState({ busy: null });
   }
@@ -339,7 +419,12 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   // Mirrors of the media stores
   // ---------------------------------------------------------------------------
 
-  const refreshSpeaking = () => setState({ speaking: player.getState().playing || speech.speaking });
+  const refreshSpeaking = () => {
+    const speaking = player.getState().playing || speech.speaking;
+    setState({ speaking });
+    // Cues stay audible under speech, at ~30%.
+    spatial?.setDucked(speaking);
+  };
 
   camera.subscribe(() => setState({ camera: camera.getState() }));
   mic.subscribe(() => setState({ mic: mic.getState() }));
@@ -444,6 +529,35 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   }
 
   // ---------------------------------------------------------------------------
+  // Detect sampler (small frames for the detector / find; never sent to Live)
+  // ---------------------------------------------------------------------------
+
+  function wantDetectFrames(): boolean {
+    if (!deps.createDetectSampler || !active || !ready || paused) return false;
+    if (state.connection !== 'live' && state.connection !== 'snapshot') return false;
+    if (doc && doc.visibilityState === 'hidden') return false;
+    return (state.settings.detections && state.server?.detector === true) || state.find !== null;
+  }
+
+  function onDetectFrame(frame: CapturedFrame) {
+    if (!wantDetectFrames() || !socket || !socket.isOpen) return;
+    if (socket.bufferedAmount >= MAX_BUFFERED_FOR_DETECT) return; // drop: never queue detection frames
+    send({ type: 'detect.frame', frame });
+  }
+
+  function updateDetectSampler() {
+    const want = wantDetectFrames();
+    if (want && !detectSamplerRunning) {
+      detectSampler ??= deps.createDetectSampler!(camera);
+      detectSamplerRunning = true;
+      detectSampler.start(onDetectFrame);
+    } else if (!want && detectSamplerRunning) {
+      detectSamplerRunning = false;
+      detectSampler?.stop();
+    }
+  }
+
+  // ---------------------------------------------------------------------------
   // Playback control
   // ---------------------------------------------------------------------------
 
@@ -504,7 +618,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     detachSocket();
     flushAllPlayback();
     stopSampler();
+    // The server-side find (and its session) is gone with the socket.
+    endFindLocal();
     if (busyInfo && busyInfo.kind !== 'connecting') clearBusy();
+    updateDetectSampler();
     if (noReconnect) {
       if (state.connection !== 'error') setConnection('ended');
       return;
@@ -555,13 +672,23 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     });
     if (busyInfo?.kind === 'connecting') clearBusy();
     if (state.error?.code === 'network') setError(null);
+    // Detection overlays default to on when the server has a detector, unless the user chose otherwise.
+    if (msg.features.detections && detectionsChosen === null && !state.settings.detections) {
+      setState({ settings: { ...state.settings, detections: true } });
+      send({ type: 'settings', settings: clientSettings() });
+    }
     if (paused) {
       send({ type: 'visibility', state: 'hidden' });
       setConnection('paused');
       return;
     }
+    if (!sessionStartCuePlayed && target !== 'error') {
+      sessionStartCuePlayed = true;
+      cue('session_start');
+    }
     setConnection(target);
     if (target === 'live') startSampler();
+    updateDetectSampler();
   }
 
   function onStatus(msg: ServerMessageOf<'status'>) {
@@ -598,7 +725,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       case 'start':
         if (local <= cancelledThrough) return;
         currentTurn = local;
-        if (busyInfo && !busyInfo.fromTool && busyInfo.kind !== 'connecting') clearBusy();
+        if (busyInfo && !busyInfo.fromTool && busyInfo.kind !== 'connecting' && busyInfo.kind !== 'finding') clearBusy();
         beginResponse(`turn:${local}`);
         return;
       case 'interrupted':
@@ -632,7 +759,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     if (cs !== 'active') return unavailable('camera_off');
     let frame: CapturedFrame | null;
     try {
-      frame = await camera.capture({ maxDim: Math.min(msg.maxDim, LIMITS.snapshotMaxDim), jpegQuality: LIMITS.snapshotJpegQuality });
+      frame =
+        msg.purpose === 'read_label'
+          ? await captureLabelStill()
+          : await camera.capture({ maxDim: Math.min(msg.maxDim, LIMITS.snapshotMaxDim), jpegQuality: LIMITS.snapshotJpegQuality });
     } catch {
       return unavailable('error');
     }
@@ -640,6 +770,26 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     if (!frame) return unavailable('not_ready');
     reply({ type: 'snapshot.result', requestId: msg.requestId, frame });
     recordFrameSent(frame);
+  }
+
+  /**
+   * Best still for reading small print: camera.captureStill (full-resolution photo or sharpest of a few frames),
+   * falling back to a normal high-res capture. A soft tick says "hold still"; the shutter cue + haptic mark the
+   * moment the photo is taken.
+   */
+  async function captureLabelStill(): Promise<CapturedFrame | null> {
+    cue('listening');
+    let frame: CapturedFrame | null = null;
+    if (typeof camera.captureStill === 'function') {
+      try {
+        frame = await camera.captureStill({ maxDim: LIMITS.detailMaxDim, jpegQuality: LIMITS.detailJpegQuality, bestOf: LIMITS.detailBestOf });
+      } catch {
+        frame = null;
+      }
+    }
+    frame ??= await camera.capture({ maxDim: LIMITS.snapshotMaxDim, jpegQuality: LIMITS.snapshotJpegQuality });
+    if (frame) cue('capture');
+    return frame;
   }
 
   function summarizeEvidence(e: LabelEvidence): string {
@@ -651,13 +801,15 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   }
 
   function onDetections(msg: ServerDetections) {
-    if (!state.settings.detections) return;
-    if (lastDetections && (msg.frameId < lastDetections.frameId || (msg.frameId === lastDetections.frameId && msg.capturedAt <= lastDetections.capturedAt))) {
-      return; // older than what we have shown
+    if (!state.settings.detections && !state.find) return;
+    const source = msg.source ?? 'yolo';
+    const last = lastDetections[source];
+    if (last && (msg.frameId < last.frameId || (msg.frameId === last.frameId && msg.capturedAt <= last.capturedAt))) {
+      return; // older than what we have shown from this source
     }
-    const ttl = msg.capturedAt + LIMITS.detectionTtlMs - now();
+    const ttl = msg.capturedAt + (source === 'gemini' ? GEMINI_DETECTION_TTL_MS : LIMITS.detectionTtlMs) - now();
     if (ttl <= 0) return;
-    lastDetections = { frameId: msg.frameId, capturedAt: msg.capturedAt };
+    lastDetections[source] = { frameId: msg.frameId, capturedAt: msg.capturedAt };
     setState({ detections: msg });
     if (detectionTimer) clearTimeout(detectionTimer);
     detectionTimer = setTimeout(() => {
@@ -666,7 +818,82 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     }, ttl);
   }
 
+  // ---------------------------------------------------------------------------
+  // Find mode (image-relative aiming help)
+  // ---------------------------------------------------------------------------
+
+  /** Forget the current find locally (no message to the server); late updates for it are ignored. */
+  function endFindLocal(announceText?: string) {
+    if (findReqId === null && state.find === null) return;
+    if (findReqId) {
+      endedFindIds.push(findReqId);
+      while (endedFindIds.length > 20) endedFindIds.shift();
+    }
+    findReqId = null;
+    findLocal = false;
+    findCenteredOnce = false;
+    spatial?.stopTracking();
+    if (busyInfo?.kind === 'finding') clearBusy();
+    setState({ find: null });
+    updateDetectSampler();
+    if (announceText) announce(announceText);
+  }
+
+  function onFind(msg: ServerMessageOf<'find'>) {
+    if (msg.requestId && endedFindIds.includes(msg.requestId)) return; // stopped locally / replaced
+    const q = msg.query;
+    if (TERMINAL_FIND.has(msg.state)) {
+      if (findReqId === null || msg.requestId !== findReqId) return;
+      if (msg.state === 'not_found') cue('lost');
+      endFindLocal(
+        msg.state === 'not_found'
+          ? `Could not find ${q} in the picture.`
+          : msg.state === 'timeout'
+            ? `Stopped finding ${q}: time limit reached.`
+            : `Stopped finding ${q}.`,
+      );
+      return;
+    }
+    if (msg.requestId !== findReqId) {
+      // A find started by the assistant (find_object tool), or the server's view of a new one.
+      findReqId = msg.requestId;
+      findLocal = false;
+      findCenteredOnce = false;
+    }
+    const prev = state.find;
+    const status: FindStatus = { query: q, state: msg.state, source: msg.source, target: msg.target, description: msg.description, updatedAt: now() };
+    setState({ find: status });
+    spatial?.startTracking();
+    switch (msg.state) {
+      case 'searching':
+        if (busyInfo?.kind !== 'finding') setBusy('finding', msg.requestId);
+        break;
+      case 'tracking':
+      case 'centered': {
+        if (busyInfo?.kind === 'finding') clearBusy();
+        if (msg.target) spatial?.setTarget(toCueTarget(msg.target.box, msg.state === 'centered'));
+        if (msg.state === 'centered' && !findCenteredOnce) {
+          findCenteredOnce = true;
+          cue('found');
+          // For assistant-started finds the assistant confirms by voice instead.
+          if (findLocal) announce(`${q} centred.`);
+        } else if (msg.state === 'tracking' && findLocal && prev && (prev.state === 'searching' || prev.state === 'lost') && msg.description) {
+          announce(`${q}: ${msg.description}.`);
+        }
+        break;
+      }
+      case 'lost':
+        spatial?.setTarget(null);
+        if (findLocal) announce(`Lost ${q}. Move the camera slowly.`);
+        break;
+      default:
+        break;
+    }
+    updateDetectSampler();
+  }
+
   function onServerError(msg: ServerMessageOf<'error'>) {
+    if (msg.requestId && msg.requestId === findReqId) endFindLocal();
     if (busyInfo && ((msg.requestId && busyInfo.requestId === msg.requestId) || (msg.code === 'snapshot_timeout' && busyInfo.fromTool))) {
       clearBusy();
     }
@@ -718,6 +945,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         void onSnapshotRequest(msg);
         return;
       case 'tool':
+        if (msg.name === 'find_object') return; // find messages drive busy/cues/announcements
         if (msg.state === 'started') {
           const kind: BusyKind = msg.name === 'read_label' ? 'reading_label' : 'looking';
           setBusy(kind, null, true);
@@ -742,6 +970,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       }
       case 'detections':
         return onDetections(msg);
+      case 'find':
+        return onFind(msg);
       case 'error':
         return onServerError(msg);
       case 'notice':
@@ -767,6 +997,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       stopSampler();
       camera.pause();
       flushAllPlayback();
+      endFindLocal(); // the server ends find mode when hidden
       if (busyInfo && busyInfo.kind !== 'connecting') clearBusy();
       setConnection('paused');
       updateGate();
@@ -798,13 +1029,13 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     const pressAt = now();
     const kind: BusyKind = action === 'read_label' ? 'reading_label' : 'looking';
     setBusy(kind, null);
-    announce(action === 'read_label' ? 'Reading label' : 'Taking a fresh look');
+    announce(action === 'read_label' ? 'Reading label. Hold still.' : 'Taking a fresh look');
     let frame: CapturedFrame | null;
     try {
-      frame = await camera.capture({
-        maxDim: action === 'read_label' ? LIMITS.snapshotMaxDim : LOOK_AGAIN_MAX_DIM,
-        jpegQuality: LIMITS.snapshotJpegQuality,
-      });
+      frame =
+        action === 'read_label'
+          ? await captureLabelStill()
+          : await camera.capture({ maxDim: LOOK_AGAIN_MAX_DIM, jpegQuality: LIMITS.snapshotJpegQuality });
     } catch {
       frame = null;
     }
@@ -840,7 +1071,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     if (busyTimer) clearTimeout(busyTimer);
     busyTimer = null;
     busyInfo = null;
+    stopWorkingCue();
     stopSampler();
+    endFindLocal();
+    updateDetectSampler();
     camera.stop();
     mic.stop();
     flushAllPlayback();
@@ -884,6 +1118,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     async start() {
       // Unlock audio FIRST, synchronously within the user gesture (before any await).
       const unlockP = player.unlock();
+      void spatial?.unlock();
       if (active) {
         if (state.connection !== 'error') {
           // Session running: treat start() as "retry" for a camera/mic that failed.
@@ -903,7 +1138,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       audioStreaming = false;
       pendingQuestion = null;
       response = null;
-      lastDetections = null;
+      delete lastDetections.yolo;
+      delete lastDetections.gemini;
+      sessionStartCuePlayed = false;
       framesSent = 0;
       framesDroppedLocal = 0;
       reconnects = 0;
@@ -911,6 +1148,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         connection: 'connecting',
         error: null,
         detections: null,
+        find: null,
         lastEvidence: null,
         talking: false,
         metrics: EMPTY_METRICS,
@@ -967,6 +1205,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         if (state.connection !== 'idle' && state.connection !== 'ended') setConnection('ended');
         return;
       }
+      cue('session_end');
+      spatial?.stopTracking();
       teardown();
       setState({ connection: 'ended', busy: null, talking: false, detections: null, speaking: false });
       announce('Session ended.');
@@ -992,12 +1232,52 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     setTalking(down: boolean) {
       if (state.talking === down) return;
       setState({ talking: down });
+      if (down && state.settings.pushToTalk) cue('listening');
       if (down && state.settings.pushToTalk && state.speaking) controller.stopSpeaking();
       updateGate();
     },
 
     readLabel: () => explicitCapture('read_label'),
     lookAgain: () => explicitCapture('look_again'),
+
+    find(query: string) {
+      // Resume the cue AudioContext synchronously inside the gesture, before anything else.
+      void spatial?.unlock();
+      const q = query.trim().slice(0, LIMITS.maxFindQueryChars);
+      if (!q || !isUsable()) return Promise.resolve();
+      if (findReqId !== null || state.find) endFindLocal(); // the server replaces it silently
+      const requestId = `find-${++reqCounter}`;
+      if (!send({ type: 'find', requestId, query: q })) {
+        setError({ code: 'network', message: 'Not connected. Try again in a moment.', recoverable: true, action: 'none' });
+        return Promise.resolve();
+      }
+      findReqId = requestId;
+      findLocal = true;
+      findCenteredOnce = false;
+      // Best guess until the server's first find message names the source.
+      const source = state.server?.detector && cocoMatch(q)?.exact ? 'yolo' : 'gemini';
+      setState({ find: { query: q, state: 'searching', source, target: null, description: null, updatedAt: now() } });
+      setBusy('finding', requestId);
+      spatial?.startTracking();
+      announce(`Finding ${q}. Move the camera slowly; beeps will guide you.`);
+      updateDetectSampler();
+      return Promise.resolve();
+    },
+
+    stopFind() {
+      if (findReqId === null && !state.find) return;
+      send({ type: 'find.stop' });
+      endFindLocal('Stopped finding.');
+    },
+
+    async setTorch(on: boolean) {
+      const ep = epoch;
+      const ok =
+        typeof camera.setTorch === 'function' ? await Promise.resolve().then(() => camera.setTorch(on)).catch(() => false) : false;
+      if (ep !== epoch) return;
+      setState({ camera: camera.getState() });
+      announce(ok ? (on ? 'Torch on.' : 'Torch off.') : 'The torch is not available on this camera.');
+    },
 
     repeat() {
       if (!isUsable()) return;
@@ -1056,6 +1336,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     async resume() {
       // Unlock audio synchronously inside the tap.
       const unlockP = player.unlock();
+      void spatial?.unlock();
       if (!active) return;
       const ep = epoch;
       if (paused && doc?.visibilityState !== 'hidden') {
@@ -1073,6 +1354,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         await camP;
         if (!isActiveEpoch(ep)) return;
         if (state.connection === 'live') startSampler();
+        updateDetectSampler();
       }
       await unlockP.catch(() => undefined);
       if (!isActiveEpoch(ep)) return;
@@ -1090,6 +1372,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       }
       flushAllPlayback();
       stopSampler();
+      endFindLocal();
       clearBusy();
       noReconnect = false;
       reconnectAttempts = 0;
@@ -1102,11 +1385,16 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       const prev = state.settings;
       const next = { ...prev, ...patch };
       setState({ settings: next });
+      if ('detections' in patch && patch.detections !== undefined) detectionsChosen = patch.detections;
       if ((prev.pushToTalk !== next.pushToTalk || prev.detections !== next.detections) && ready) {
         send({ type: 'settings', settings: clientSettings() });
       }
-      if (!next.detections) setState({ detections: null });
+      if (!next.detections && !state.find) setState({ detections: null });
+      if (prev.earcons !== next.earcons || prev.spatialAudio !== next.spatialAudio || prev.haptics !== next.haptics || prev.headphones !== next.headphones) {
+        applySpatialConfig();
+      }
       updateGate();
+      updateDetectSampler();
     },
 
     clearTranscript() {
