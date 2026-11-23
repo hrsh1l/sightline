@@ -150,7 +150,29 @@ An earlier single `check:models` run measured 33.4 s for `gemini-3.6-flash` and 
 provider latency for the Flash vision model was highly variable that evening; the label pipeline therefore uses
 flash-lite for fast steps and falls back to it on 503/504/timeouts (see implementation status).
 
-Not yet measured: image-bearing label extraction latency/accuracy, Live question-to-first-audio on the phone.
+### Label reading, live (2026-11-23, late evening)
+
+- **Bug found only by live testing:** every label extraction failed with HTTP 400 *"The specified schema produces a
+  constraint that has too many states for serving"* — the model-facing JSON schema used nested `maxItems` limits.
+  Unit tests with FIXTURE models could not catch this. Fixed: model-facing schemas carry no size/range keywords
+  (`src/server/vision/servingSchema.ts`, regression test); all three schemas (extraction, text regions, locate)
+  were then accepted by the live API. This is the most likely cause of "can't read small labels" on the S25.
+- `npx tsx scripts/eval-label.ts` on a **SYNTHETIC** packet-back image (label panel 900×420 px with ~15 px text on a
+  4000×3000 photo): two-pass detail read recovered **12/12** ground-truth facts (product, ingredients with %, mustard
+  advice, 800 W microwave steps incl. "1 minute 30 seconds", oven 190 °C / Gas 5, "use within 24 hours", printed
+  date, batch code kept separate). "BEST BEFORE END: 03 2027" → best_before_end, 2027-03-31, future. 6 regions
+  cropped; pass 1 took 1.4 s. Total 19.0 s because `gemini-3.6-flash` hit the 15 s timeout and the read fell back to
+  `gemini-3.5-flash-lite`. A 1190 px single-pass read also scored 12/12 (17.2 s, same fallback): this synthetic
+  image is too clean to show the benefit of cropping; real packaging photos are needed for that comparison.
+- During testing the account returned 429 (quota) for `gemini-3.6-flash`; the vision fallback now also covers 429.
+
+### Find mode locate, live
+
+On the Ultralytics sample photo `bus.jpg`: Gemini locate "the bus" → box (x 0.000, y 0.214, w 0.991, h 0.466),
+confidence 0.98, 1227 ms; the local YOLO26n detector's bus box on the same image was (0.000, 0.213, 0.992, 0.482).
+"a pineapple" (absent) → no boxes, 846 ms. One earlier locate attempt returned 503 (provider overloaded).
+
+Not yet measured: Live question-to-first-audio on the phone; real-packaging accuracy; find mode end to end on the S25.
 
 ## 5. Physical S25 tests
 

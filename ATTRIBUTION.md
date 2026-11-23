@@ -14,6 +14,7 @@ dependencies, installed by package managers and not committed.
 | zod | 4.6.7 | MIT | Message validation |
 | dotenv | 18.0.10 | BSD-2-Clause | Local .env loading |
 | react, react-dom | 19.3.1 | MIT | UI |
+| sharp | 0.35.5 | Apache-2.0 (prebuilt libvips binaries are LGPL-3.0-or-later) | Server-side cropping of label text regions |
 
 Dev tooling (TypeScript 6.0.3, Vite 8.3.8, Vitest 5.1.1, Playwright 1.65.1, ESLint 10.15.0, typescript-eslint 8.74.0,
 tsx 4.23.15, jsdom 31.0.1, Testing Library 16.3.3) is used under its respective open-source licences (MIT /

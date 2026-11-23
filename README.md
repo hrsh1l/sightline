@@ -31,6 +31,17 @@ Node server (express + ws) ── Gemini Live (gemini-3.8-live): voice in/out, f
   separately from interpretation, and interprets dates deterministically (no invented years, no guessed
   day/month order, batch codes kept separate), comparing against an injected current date in Europe/London.
 - Interruptions flush playback immediately; output from a cancelled turn is discarded on server and client.
+- **Small print:** "Read label" takes a full-resolution still (ImageCapture photo, or the sharpest of three frames),
+  finds the text regions with a fast model, crops them at native resolution and reads the crops at Gemini's
+  highest image resolution. A **Torch** button lights the label. If the main vision model is slow, overloaded or
+  out of quota, the read falls back to the fast model once.
+- **Object boxes:** green boxes over the preview from the optional local YOLO26n detector (up to 4 FPS on small
+  frames that never go to Gemini Live).
+- **Find mode** ("Where's the salt?", or type in *Find something*): tracks the item and plays **aiming beeps** —
+  left/right = where it is in the picture, higher pitch = higher in the picture, faster = closer to the centre, a
+  steady two-tone + vibration when it is centred. Generic objects use YOLO; anything else ("the red tin", "the
+  label text") uses Gemini box detection about once a second. Positions are image-relative aiming help only.
+- **Event sounds and haptics:** short cues for session start/end, hold-still/shutter, working, found, lost, error.
 - If Gemini Live is unavailable, **Snapshot mode** sends a fresh still photo with each typed question to the
   vision model and reads the answer with browser text-to-speech.
 
@@ -125,6 +136,8 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `npm run test:e2e` | Desktop Chromium e2e with fake camera/mic and FIXTURE providers (`npx playwright install chromium` once) |
 | `npm run check:secrets` | Scan the client build for keys or direct provider endpoints (run after build) |
 | `npm run check:models` | Verify the configured account can actually use the configured models |
+| `npm run detector` | Run the optional local YOLO detector on 127.0.0.1:8765 |
+| `npx tsx scripts/eval-label.ts` | Live label-reading probe on a synthetic packet image (uses API quota) |
 | `npm run verify` | typecheck + lint + test + build + secret scan |
 
 ## Configuration (`.env`)
@@ -133,7 +146,8 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 |---|---|---|
 | `GEMINI_API_KEY` | — | Server-side only. Missing → honest "not configured" state; the UI still loads. |
 | `LIVE_MODEL` | `gemini-3.8-live` | Live (native audio) model |
-| `VISION_MODEL` | `gemini-3.6-flash` | Label reading and snapshot answers |
+| `VISION_MODEL` | `gemini-3.6-flash` | Label reading and snapshot answers (falls back to `LOCATE_MODEL` on timeout/5xx/429) |
+| `LOCATE_MODEL` | `gemini-3.5-flash-lite` | Fast model: find-mode boxes, label text-region pass, fallback reads |
 | `LIVE_VOICE` | `Kore` | Prebuilt voice |
 | `ASSISTANT_LANGUAGE` | `English` | Reply language; Sightline won't switch because of printed text or background speech |
 | `PORT` / `HOST` | `3000` / `127.0.0.1` | 127.0.0.1 is enough for adb reverse and tunnels |
@@ -143,12 +157,16 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `APP_TIMEZONE` | `Europe/London` | Date comparisons on packaging |
 | `DETECTOR_URL` | — | e.g. `http://127.0.0.1:8765` to enable the optional YOLO overlay |
 
-## Optional YOLO overlay
+## Object boxes (optional local YOLO detector)
 
 ```sh
-cd services/detector && uv sync && uv run python server.py --port 8765   # ~1 GB first install; weights ~5.5 MB
-# then in .env: DETECTOR_URL=http://127.0.0.1:8765 and restart the Node server
+cd services/detector && uv sync && cd ../..   # one time, ~1 GB (PyTorch); weights (~5.5 MB) download on first start
+npm run detector                              # terminal 2: serves http://127.0.0.1:8765
+# in .env: DETECTOR_URL=http://127.0.0.1:8765   then restart `npm run dev`
 ```
+
+`/api/health` then reports `"detector": "ok"`, and Settings › *Show object boxes* is on by default. Without the
+detector, Find mode still works through Gemini (one box, about once a second).
 
 YOLO26n (COCO, 80 generic classes) draws image-relative boxes only. It cannot identify products, read text or
 dates, and never answers questions — Gemini does. Licence: AGPL-3.0 (see [ATTRIBUTION.md](ATTRIBUTION.md)).

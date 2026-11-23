@@ -61,3 +61,14 @@ Status values: `todo`, `in progress`, `done (verified: …)`, `deferred`, `block
 
 - Optional YOLO overlay: implemented and run locally on a sample image, but off by default and not tried on kitchen frames or with the phone.
 - Source archive: produce with `git archive` after live/device validation (excludes .env, node_modules, weights by construction).
+
+## v2 (2026-11-23 late): small print, object boxes, find mode, spatial audio
+
+| # | Task | Owner | Status |
+|---|---|---|---|
+| 10 | Contracts v2 (detail stills, detect frames, find, cues, torch), sharp dependency | lead | done |
+| 11 | Detail stills (ImageCapture / sharpest-of-3), torch, autofocus, 2560×1440 stream; two-pass crop reading at ULTRA_HIGH; `locate()`; model fallback | detail-reading worker | done (unit tests; Chromium e2e produced 3840 px stills; live: 12/12 facts on a synthetic label; not yet on S25) |
+| 12 | Find mode (YOLO or Gemini tracking, state machine, `find_object` Live tool), spatial cue engine, earcons, haptics, detect sampler | find/audio worker | done (unit tests with fakes; not yet heard on the S25) |
+| 13 | Green boxes, Find panel, torch toggle, sound settings, diagnostics | UI worker | done (RTL tests + Chromium e2e; not yet on S25/TalkBack) |
+| 14 | Integration: main.tsx wiring, live schema bug fix, 429 fallback, test updates | lead | done (649 unit/integration tests, 9/9 e2e, build, secret scan) |
+| 15 | Local YOLO in main tree | lead | done (uv sync, weights downloaded, service answers; user must add DETECTOR_URL to .env) |
