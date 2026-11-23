@@ -2,8 +2,8 @@
  * Unit tests for GeminiVision with a FIXTURE fake `ai` object. No live inference: the model's JSON below is
  * hand-written test data, not real model output. Live behaviour is unverified in this environment.
  */
-import { ApiError, ThinkingLevel, type GenerateContentParameters } from '@google/genai';
-import { describe, expect, it } from 'vitest';
+import { ApiError, PartMediaResolutionLevel, ThinkingLevel, type GenerateContentParameters } from '@google/genai';
+import { describe, expect, it, vi } from 'vitest';
 import { LabelEvidence, type FramePayload } from '../../shared/protocol.js';
 import type { AppConfig } from '../config.js';
 import { VisionError } from '../contracts.js';
@@ -12,6 +12,7 @@ import { classifyVisionError, cleanAnswerText, createGeminiVision, EXTRACTION_RE
 
 const config = {
   visionModel: 'gemini-3.6-flash',
+  locateModel: 'gemini-3.5-flash-lite',
   timeZone: 'Europe/London',
 } as AppConfig;
 
@@ -110,6 +111,8 @@ describe('extractLabel', () => {
     const contents = req.contents as Array<{ parts: Array<{ text?: string; inlineData?: { data: string; mimeType: string } }> }>;
     expect(contents[0]!.parts[0]!.text).toContain('the cooking instructions');
     expect(contents[0]!.parts[1]!.inlineData).toEqual({ mimeType: 'image/jpeg', data: IMAGE_B64 });
+    // 1200x1600 frame (>= 1600 px): whole-image read at ULTRA_HIGH.
+    expect((contents[0]!.parts[1] as { mediaResolution?: unknown }).mediaResolution).toEqual({ level: PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH });
 
     // Logs are metadata only: no image data or transcribed text.
     const logged = JSON.stringify(log.events);
@@ -182,6 +185,8 @@ describe('extractLabel', () => {
         }),
     ]);
     const promise = createGeminiVision({ ai, config, log: memLog() }).extractLabel({ frame: frame(), now: NOW, signal: controller.signal });
+    // The fixture bytes are not a decodable JPEG, so the detail pass is skipped asynchronously before the call.
+    await vi.waitFor(() => expect(calls).toHaveLength(1));
     expect(calls[0]!.config!.abortSignal).toBeInstanceOf(AbortSignal);
     expect(calls[0]!.config!.abortSignal!.aborted).toBe(false);
     controller.abort();
@@ -290,6 +295,14 @@ describe('answer', () => {
     expect(contents.map((c) => c.role)).toEqual(['user', 'model', 'user']);
     expect(contents[2]!.parts[0]!.text).toBe('What is this jar?');
     expect(contents[2]!.parts[1]!.inlineData).toBeDefined();
+    expect((contents[2]!.parts[1] as { mediaResolution?: unknown }).mediaResolution).toEqual({ level: PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH });
+  });
+
+  it('sends frames under 1600 px at HIGH media resolution', async () => {
+    const { ai, calls } = fakeAi(['A mug.']);
+    await createGeminiVision({ ai, config, log: memLog() }).answer({ frame: frame({ width: 768, height: 1024 }), question: 'q', history: [], now: NOW });
+    const part = (calls[0]!.contents as Array<{ parts: Array<{ mediaResolution?: unknown }> }>)[0]!.parts[1]!;
+    expect(part.mediaResolution).toEqual({ level: PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH });
   });
 
   it('empty answer -> VisionError(invalid_output)', async () => {

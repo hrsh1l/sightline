@@ -70,3 +70,73 @@ export function buildExtractionUserText(focus: string | undefined): string {
     ? `Read the label in this photo. The person asked about: "${f}". Still transcribe all legible label text, but make sure that part is included if it is visible.`
     : 'Read the label in this photo.';
 }
+
+const clipFocus = (focus: string | undefined) => focus?.replace(/\s+/g, ' ').trim().slice(0, 200) ?? '';
+
+/** Pass 1 of detail reading: find printed text regions (boxes only, no transcription). */
+export function buildRegionInstruction(): string {
+  return `You locate printed text on food packaging, labels and kitchen items in one photo, so that each region can be cropped at full resolution and read carefully afterwards. You do not transcribe anything.
+
+${UNTRUSTED_TEXT_RULE}
+
+Rules:
+- Return up to 6 regions of printed text, most relevant first. Prefer distinct blocks: the product name, the ingredients panel, allergen statements, cooking or preparation instructions, storage text, nutrition table, and dates with lot/batch codes (often small, printed or embossed near an edge, a seam, the lid or the bottom).
+- Small print matters most: include small text blocks even if they are hard to read at this size. Large lettering that is already easy to read needs no region of its own when space is short.
+- Each box_2d is [ymin, xmin, ymax, xmax] normalized to 0-1000 relative to this image, and must enclose the whole block of text, including its heading.
+- kind is the type of text in the region; use other_text when unsure.
+- If there is no printed text in the image, return an empty list. Never invent regions.
+
+Return only the JSON object described by the response schema.`;
+}
+
+/** Pass-1 user text. `focus` steers which regions come first. */
+export function buildRegionUserText(focus: string | undefined): string {
+  const f = clipFocus(focus);
+  const base = 'Detect the printed text regions in this image. The box_2d should be [ymin, xmin, ymax, xmax] normalized to 0-1000.';
+  return f ? `${base} The person asked about: "${f}". Put the region(s) most likely to contain that first, then other label text.` : base;
+}
+
+/** Pass 2 of detail reading: the extraction instruction plus how to use the zoomed crops. */
+export function buildDetailExtractionInstruction(now: Date, timeZone: string): string {
+  return `${buildExtractionInstruction(now, timeZone)}
+
+How the images are arranged:
+- The first image is an overview of the whole photo. It is followed by zoomed crops cut from the same photo at full resolution, each introduced by a short line such as "Crop 2 of 4 (dates and codes region) from the same photo:". All images show the same single item; crops are not separate items.
+- Read small text from the crops, where it is much sharper. Use the overview to understand the layout and which block is which.
+- Crops may overlap each other and the overview. Transcribe each piece of text once only, even if it appears in several images.
+- Text cut off at the edge of a crop is not necessarily cut off on the pack: check the overview and the other crops. Report text_cut_off only if text is cut off at the edge of the overview photo itself. Report issues for the photo as a whole.
+- If a crop shows no readable text, ignore it.`;
+}
+
+/** Pass-2 user text, placed before the overview image. */
+export function buildDetailUserText(focus: string | undefined, cropCount: number): string {
+  const intro = buildExtractionUserText(focus);
+  return `${intro} You get an overview of the photo and ${cropCount} zoomed crop${cropCount === 1 ? '' : 's'} of its text regions. Overview of the whole photo:`;
+}
+
+export function buildCropCaption(index: number, count: number, kindLabel: string): string {
+  return `Crop ${index} of ${count} (${kindLabel} region) from the same photo:`;
+}
+
+/** Find mode: system instruction for box detection of one requested item. */
+export function buildLocateInstruction(): string {
+  return `You help a blind or low-vision person aim their phone camera at an item they are looking for. You receive one photo and the name of the item, and return bounding boxes for that item only.
+
+${UNTRUSTED_TEXT_RULE}
+
+Rules:
+- Find only the requested item (for example "salt", "the red tin", "the label text"). Do not return other objects.
+- Return an empty list if the requested item is not clearly visible. Never guess, and never return a box for something that only might be it.
+- If several objects match, return each (at most 5), most likely first.
+- box_2d is [ymin, xmin, ymax, xmax] normalized to 0-1000 relative to the image.
+- label is the item's name as visible (for example "salt shaker", "red tin of tomatoes"), short.
+- confidence is how sure you are that the box shows the requested item, from 0 to 1.
+
+Return only the JSON object described by the response schema.`;
+}
+
+/** Find mode user text. The query is untrusted and goes here, never in the system instruction. */
+export function buildLocateUserText(query: string): string {
+  const q = query.replace(/\s+/g, ' ').trim().slice(0, 80);
+  return `Find this item in the image: "${q}". Return boxes only for that item, or an empty list if it is not clearly visible. The box_2d should be [ymin, xmin, ymax, xmax] normalized to 0-1000.`;
+}
