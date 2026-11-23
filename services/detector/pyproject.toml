@@ -1,0 +1,18 @@
+[project]
+name = "sightline-detector"
+version = "0.1.0"
+description = "Optional private local YOLO object detector for Sightline (COCO classes only; generic objects)."
+requires-python = "==3.12.*"
+license = "AGPL-3.0-only"
+# Exact pins for the direct runtime dependencies; uv.lock pins everything transitively.
+dependencies = [
+    "ultralytics==8.4.218",
+    "torch==2.15.0",
+    "torchvision==0.29.2",
+    "numpy==2.5.5",
+    "pillow==13.0.0",
+    "opencv-python==5.1.0.95",
+]
+
+[tool.uv]
+package = false
