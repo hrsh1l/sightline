@@ -41,8 +41,8 @@ describe('systemPrompt', () => {
 });
 
 describe('tools', () => {
-  it('declares exactly read_label and look_again with JSON schemas', () => {
-    expect(functionDeclarations.map((d) => d.name)).toEqual(['read_label', 'look_again']);
+  it('declares exactly read_label, look_again and find_object with JSON schemas', () => {
+    expect(functionDeclarations.map((d) => d.name)).toEqual(['read_label', 'look_again', 'find_object']);
     for (const d of functionDeclarations) expect(d.parametersJsonSchema).toMatchObject({ type: 'object' });
   });
 
@@ -53,6 +53,25 @@ describe('tools', () => {
     expect(parseToolCall('read_label', { focus: 'x'.repeat(500) })).toMatchObject({ ok: false });
     expect(parseToolCall('run_shell', { cmd: 'rm -rf /' })).toMatchObject({ ok: false, error: 'unknown_tool' });
     expect(parseToolCall(undefined, {})).toMatchObject({ ok: false, error: 'unknown_tool' });
+  });
+
+  it('find_object requires a short query string', () => {
+    expect(parseToolCall('find_object', { query: '  the salt ' })).toEqual({ ok: true, name: 'find_object', args: { query: 'the salt' } });
+    expect(parseToolCall('find_object', {})).toMatchObject({ ok: false, error: 'invalid_arguments' });
+    expect(parseToolCall('find_object', { query: '' })).toMatchObject({ ok: false, error: 'invalid_arguments' });
+    expect(parseToolCall('find_object', { query: 'x'.repeat(81) })).toMatchObject({ ok: false, error: 'invalid_arguments' });
+    const decl = functionDeclarations.find((d) => d.name === 'find_object')!;
+    expect(decl.parametersJsonSchema).toMatchObject({ required: ['query'] });
+    expect(decl.description).toMatch(/image-relative/i);
+  });
+
+  it('the system prompt explains find_object with image-relative framing', () => {
+    const text = buildSystemInstruction({ now: new Date('2026-11-23T12:00:00Z'), timeZone: 'Europe/London' });
+    expect(text).toContain('find_object');
+    expect(text).toContain('"the label text"');
+    expect(text).toMatch(/never give walking, mobility or navigation directions/);
+    expect(text).toMatch(/never estimate distances/);
+    expect(text).toMatch(/sharp items, help aim the camera only/);
   });
 
   it('compactEvidence omits model metadata and includes guidance', () => {

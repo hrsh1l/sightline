@@ -107,6 +107,11 @@ function createFakeVision() {
     model: 'fake-vision',
     extractLabel: vi.fn(async ({ frame }: Parameters<VisionService['extractLabel']>[0]) => fakeEvidence(frame)),
     answer: vi.fn(async (_input: Parameters<VisionService['answer']>[0]) => ({ text: 'FIXTURE answer: a tin of tomatoes.', latencyMs: 12 })),
+    locate: vi.fn(async (_input: Parameters<VisionService['locate']>[0]) => ({
+      boxes: [] as { label: string; box: { x: number; y: number; w: number; h: number }; score: number }[],
+      model: 'fake-locate',
+      latencyMs: 8,
+    })),
   } satisfies VisionService;
   return vision;
 }
@@ -276,7 +281,7 @@ describe('hello and credentials', () => {
     expect('enableAffectiveDialog' in cfg).toBe(false);
     expect('proactivity' in cfg).toBe(false);
     const tools = cfg.tools as { functionDeclarations: { name: string }[] }[];
-    expect(tools[0]!.functionDeclarations.map((f) => f.name)).toEqual(['read_label', 'look_again']);
+    expect(tools[0]!.functionDeclarations.map((f) => f.name)).toEqual(['read_label', 'look_again', 'find_object']);
     expect(String(cfg.systemInstruction)).toContain('Monday 23 November 2026');
     expect(h.of('status').map((s) => s.state)).toEqual(['connecting', 'live']);
     expect(h.of('ready')[0]).toMatchObject({ mode: 'live', features: { live: true, snapshot: true }, models: { live: 'gemini-3.8-live' } });
@@ -715,5 +720,334 @@ describe('dispose and limits', () => {
     const logged = JSON.stringify(h.log.events);
     expect(logged).not.toContain('SECRET');
     expect(logged).not.toContain('QUFBQUFB');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Detect frames and find mode (FIXTURE detector / vision.locate)
+// ---------------------------------------------------------------------------
+
+type Box = { x: number; y: number; w: number; h: number };
+const boxAt = (cx: number, cy: number, s = 0.1): Box => ({ x: cx - s / 2, y: cy - s / 2, w: s, h: s });
+
+function detectorReturns(h: ReturnType<typeof createHarness>, items: (frame: FramePayload) => { label: string; score: number; box: Box }[]) {
+  h.detector.detect.mockImplementation(async (frame: FramePayload) => ({
+    type: 'detections' as const,
+    frameId: frame.frameId,
+    capturedAt: frame.capturedAt,
+    sourceWidth: frame.width,
+    sourceHeight: frame.height,
+    detectedAt: Date.now(),
+    model: 'fake-detector',
+    detections: items(frame),
+  }));
+}
+
+const detectFrame = (id: number, capturedAt = Date.now()): ClientMessage => ({ type: 'detect.frame', frame: makeFrame(id, capturedAt) });
+
+describe('detect frames', () => {
+  it('runs the detector on detect.frame (never forwarded to Live) and tags results as yolo', async () => {
+    const h = createHarness({ detector: true });
+    h.send(hello({ settings: { pushToTalk: false, detections: true } }));
+    await flush();
+    h.send(detectFrame(1));
+    await flush();
+    expect(h.of('detections')).toEqual([expect.objectContaining({ frameId: 1, source: 'yolo' })]);
+    expect(h.fake.last.realtime).toHaveLength(0);
+    // Out of order, duplicate and stale detect frames are dropped before the detector.
+    h.send(detectFrame(1));
+    h.send(detectFrame(0));
+    h.send(detectFrame(2, Date.now() - 5_000));
+    await flush();
+    expect(h.detector.detect).toHaveBeenCalledTimes(1);
+    // While detect frames flow, ambient frames go to Live but not to the detector.
+    h.send({ type: 'frame', frame: makeFrame(3) });
+    await flush();
+    expect(h.fake.last.realtime).toHaveLength(1);
+    expect(h.detector.detect).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores detect frames when detections are off and no find is active, and while paused', async () => {
+    const h = createHarness({ detector: true });
+    h.send(hello());
+    await flush();
+    h.send(detectFrame(1));
+    h.send({ type: 'settings', settings: { pushToTalk: false, detections: true } });
+    h.send({ type: 'visibility', state: 'hidden' });
+    h.send(detectFrame(2));
+    await flush();
+    expect(h.detector.detect).not.toHaveBeenCalled();
+  });
+});
+
+describe('find mode', () => {
+  it('YOLO: searching -> tracking -> centered, marks the target, sends only the target when overlays are off', async () => {
+    const h = await liveHarness({ detector: true });
+    let pos = boxAt(0.15, 0.2);
+    detectorReturns(h, () => [
+      { label: 'bottle', score: 0.9, box: boxAt(0.8, 0.8) },
+      { label: 'cup', score: 0.8, box: pos },
+    ]);
+    h.send({ type: 'find', requestId: 'f1', query: 'the mug' });
+    expect(h.of('find')).toEqual([expect.objectContaining({ requestId: 'f1', query: 'the mug', state: 'searching', source: 'yolo', target: null })]);
+    h.send(detectFrame(1));
+    await flush();
+    expect(h.of('find').at(-1)).toMatchObject({
+      state: 'tracking',
+      frameId: 1,
+      target: { label: 'cup' },
+      description: 'left of the picture, near the top, small',
+    });
+    expect(h.of('detections').at(-1)!.detections).toEqual([expect.objectContaining({ label: 'cup', target: true })]);
+    pos = boxAt(0.5, 0.5);
+    vi.advanceTimersByTime(300);
+    h.send(detectFrame(2));
+    await flush();
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'centered', frameId: 2 });
+    // UI-started finds never inject an app event into Live.
+    expect(h.fake.last.clientContent).toHaveLength(0);
+    h.send({ type: 'find.stop' });
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'stopped', target: null });
+    const calls = h.detector.detect.mock.calls.length;
+    h.send(detectFrame(3));
+    await flush();
+    expect(h.detector.detect.mock.calls.length).toBe(calls); // overlays off and no find -> no detection
+  });
+
+  it('YOLO with overlays on: all detections are sent and the target is flagged', async () => {
+    const h = createHarness({ detector: true });
+    h.send(hello({ settings: { pushToTalk: false, detections: true } }));
+    await flush();
+    detectorReturns(h, () => [
+      { label: 'bottle', score: 0.9, box: boxAt(0.8, 0.8) },
+      { label: 'cup', score: 0.8, box: boxAt(0.3, 0.5) },
+    ]);
+    h.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    h.send(detectFrame(1));
+    await flush();
+    const d = h.of('detections').at(-1)!;
+    expect(d.detections.map((x) => [x.label, x.target === true])).toEqual([
+      ['bottle', false],
+      ['cup', true],
+    ]);
+  });
+
+  it('lost after ~1.5 s unseen, then not_found after ~10 s more; find ends', async () => {
+    const h = await liveHarness({ detector: true });
+    let seen = true;
+    detectorReturns(h, () => (seen ? [{ label: 'cup', score: 0.8, box: boxAt(0.2, 0.5) }] : []));
+    h.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    h.send(detectFrame(1));
+    await flush();
+    seen = false;
+    await vi.advanceTimersByTimeAsync(1_600);
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'lost', target: null });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'not_found' });
+    const n = h.of('find').length;
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(h.of('find')).toHaveLength(n);
+  });
+
+  it('times out after LIMITS.findTimeoutMs', async () => {
+    const h = await liveHarness({ detector: true });
+    detectorReturns(h, () => [{ label: 'cup', score: 0.8, box: boxAt(0.2, 0.5) }]);
+    h.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    for (let i = 1; i <= 400; i++) {
+      h.send(detectFrame(i));
+      await vi.advanceTimersByTimeAsync(250);
+      if (h.of('find').at(-1)!.state === 'timeout') break;
+    }
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'timeout' });
+  });
+
+  it('a new find replaces the old one without a stopped message', async () => {
+    const h = await liveHarness({ detector: true });
+    h.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    h.send({ type: 'find', requestId: 'f2', query: 'bottle' });
+    expect(h.of('find').map((m) => [m.requestId, m.state])).toEqual([
+      ['f1', 'searching'],
+      ['f2', 'searching'],
+    ]);
+  });
+
+  it('Gemini locate for non-COCO queries: rate-limited, one in flight, boxes tagged gemini; failures are "no update"', async () => {
+    const h = await liveHarness({ detector: true });
+    let resolveLocate: ((v: Awaited<ReturnType<VisionService['locate']>>) => void) | null = null;
+    h.vision.locate.mockImplementation(
+      () =>
+        new Promise((r) => {
+          resolveLocate = r;
+        }),
+    );
+    h.send({ type: 'find', requestId: 'f1', query: 'the salt' });
+    expect(h.of('find')[0]).toMatchObject({ source: 'gemini', state: 'searching' });
+    h.send(detectFrame(1));
+    h.send(detectFrame(2)); // in flight -> skipped
+    expect(h.vision.locate).toHaveBeenCalledTimes(1);
+    expect(h.vision.locate.mock.calls[0]![0]).toMatchObject({ query: 'the salt', frame: { frameId: 1 } });
+    expect(h.detector.detect).not.toHaveBeenCalled(); // detector not used while Gemini tracks
+    resolveLocate!({ boxes: [{ label: 'salt shaker', score: 0.7, box: boxAt(0.8, 0.5) }], model: 'fake-locate', latencyMs: 400 });
+    await flush();
+    expect(h.of('detections').at(-1)).toMatchObject({ source: 'gemini', frameId: 1, model: 'fake-locate', detections: [{ label: 'salt shaker', target: true }] });
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'tracking', source: 'gemini', description: expect.stringContaining('right of the picture') });
+    h.send(detectFrame(3)); // < locateMinIntervalMs since the last call
+    expect(h.vision.locate).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(1_250);
+    h.vision.locate.mockRejectedValue(new Error('FIXTURE 504'));
+    h.send(detectFrame(4));
+    await flush();
+    expect(h.vision.locate).toHaveBeenCalledTimes(2);
+    expect(h.of('find').at(-1)!.state).toBe('tracking'); // a failure is not "not found"
+    expect(h.of('error')).toHaveLength(0);
+  });
+
+  it('aborts an in-flight locate on find.stop and on dispose', async () => {
+    const h = await liveHarness();
+    const signals: AbortSignal[] = [];
+    h.vision.locate.mockImplementation((input) => {
+      if (input.signal) signals.push(input.signal);
+      return new Promise(() => undefined);
+    });
+    h.send({ type: 'find', requestId: 'f1', query: 'salt' });
+    h.send(detectFrame(1));
+    h.send({ type: 'find.stop' });
+    expect(signals[0]!.aborted).toBe(true);
+    h.send({ type: 'find', requestId: 'f2', query: 'salt' });
+    h.send(detectFrame(2));
+    h.session.dispose('test');
+    expect(signals[1]!.aborted).toBe(true);
+  });
+
+  it('times out a slow locate after ~6 s (no update) and tries again', async () => {
+    const h = await liveHarness();
+    h.vision.locate.mockImplementation(
+      (input) => new Promise((_, reject) => input.signal?.addEventListener('abort', () => reject(new Error('aborted')))),
+    );
+    h.send({ type: 'find', requestId: 'f1', query: 'salt' });
+    h.send(detectFrame(1));
+    await vi.advanceTimersByTimeAsync(6_100);
+    h.send(detectFrame(2));
+    expect(h.vision.locate).toHaveBeenCalledTimes(2);
+    expect(h.of('find').at(-1)!.state).toBe('searching');
+  });
+
+  it('reports a clear error when neither detector nor vision can find', async () => {
+    const none = await liveHarness({ vision: false });
+    none.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    expect(none.of('error').at(-1)).toMatchObject({ code: 'detector_unavailable', requestId: 'f1', recoverable: true });
+    expect(none.of('find')).toHaveLength(0);
+
+    const yoloOnly = await liveHarness({ vision: false, detector: true });
+    yoloOnly.send({ type: 'find', requestId: 'f2', query: 'salt' });
+    expect(yoloOnly.of('error').at(-1)!.message).toContain('common objects');
+    yoloOnly.send({ type: 'find', requestId: 'f3', query: 'the red cup' }); // modified, but YOLO is all there is
+    expect(yoloOnly.of('find').at(-1)).toMatchObject({ requestId: 'f3', source: 'yolo' });
+  });
+
+  it('modified COCO queries go to Gemini when vision is available', async () => {
+    const h = await liveHarness({ detector: true });
+    h.send({ type: 'find', requestId: 'f1', query: 'the red cup' });
+    expect(h.of('find').at(-1)).toMatchObject({ source: 'gemini' });
+  });
+
+  it('hidden ends the find', async () => {
+    const h = await liveHarness({ detector: true });
+    h.send({ type: 'find', requestId: 'f1', query: 'cup' });
+    h.send({ type: 'visibility', state: 'hidden' });
+    expect(h.of('find').at(-1)).toMatchObject({ state: 'stopped' });
+  });
+});
+
+describe('find_object tool', () => {
+  it('starts find, answers with the image-relative position, then sends ONE centred app event', async () => {
+    const h = await liveHarness({ detector: true });
+    let pos = boxAt(0.15, 0.8);
+    detectorReturns(h, () => [{ label: 'cup', score: 0.8, box: pos }]);
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'fo1', name: 'find_object', args: { query: 'mug' } }] } });
+    expect(h.of('tool')[0]).toMatchObject({ callId: 'fo1', name: 'find_object', state: 'started' });
+    expect(h.of('find')[0]).toMatchObject({ state: 'searching', requestId: 'tool-find-1', query: 'mug' });
+    h.send(detectFrame(1));
+    await flush();
+    const fr = responses(h.fake.last.toolResponses[0]!)[0]!;
+    expect(fr).toMatchObject({ id: 'fo1', name: 'find_object' });
+    expect(fr.response.output).toEqual({
+      status: 'tracking',
+      description: 'left of the picture, near the bottom, small',
+      guidance: expect.stringContaining('beeps will guide them to centre it'),
+    });
+    expect(h.of('tool').at(-1)).toMatchObject({ state: 'completed' });
+    pos = boxAt(0.5, 0.5);
+    vi.advanceTimersByTime(300);
+    h.send(detectFrame(2));
+    await flush();
+    expect(h.fake.last.clientContent).toEqual([
+      {
+        turns: [{ role: 'user', parts: [{ text: '[Sightline app event: the mug is now centred in the picture.] Confirm in at most six words.' }] }],
+        turnComplete: true,
+      },
+    ]);
+    // Off-centre and centred again: still only one event per find.
+    pos = boxAt(0.9, 0.5);
+    vi.advanceTimersByTime(300);
+    h.send(detectFrame(3));
+    await flush();
+    pos = boxAt(0.5, 0.5);
+    vi.advanceTimersByTime(300);
+    h.send(detectFrame(4));
+    await flush();
+    expect(h.fake.last.clientContent).toHaveLength(1);
+  });
+
+  it('defers the centred event while a model turn is active and sends it at turnComplete', async () => {
+    const h = await liveHarness({ detector: true });
+    let pos = boxAt(0.15, 0.5);
+    detectorReturns(h, () => [{ label: 'cup', score: 0.8, box: pos }]);
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'fo1', name: 'find_object', args: { query: 'cup' } }] } });
+    h.send(detectFrame(1));
+    await flush();
+    h.fake.last.emit(audioMsg('AAAA')); // model is speaking its answer
+    pos = boxAt(0.5, 0.5);
+    vi.advanceTimersByTime(300);
+    h.send(detectFrame(2));
+    await flush();
+    expect(h.fake.last.clientContent).toHaveLength(0);
+    h.fake.last.emit({ serverContent: { turnComplete: true } });
+    expect(h.fake.last.clientContent).toHaveLength(1);
+  });
+
+  it('centred in the first result: the tool response says so and no app event follows', async () => {
+    const h = await liveHarness({ detector: true });
+    detectorReturns(h, () => [{ label: 'knife', score: 0.8, box: boxAt(0.5, 0.5) }]);
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'fo1', name: 'find_object', args: { query: 'knife' } }] } });
+    h.send(detectFrame(1));
+    await flush();
+    const out = responses(h.fake.last.toolResponses[0]!)[0]!.response.output!;
+    expect(out.status).toBe('centered');
+    expect(String(out.guidance)).toContain('never guide their hand');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(h.fake.last.clientContent).toHaveLength(0);
+  });
+
+  it('not visible within ~3 s -> not_visible, while find keeps searching', async () => {
+    const h = await liveHarness({ detector: true });
+    detectorReturns(h, () => []);
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'fo1', name: 'find_object', args: { query: 'cup' } }] } });
+    h.send(detectFrame(1));
+    await vi.advanceTimersByTimeAsync(3_001);
+    expect(responses(h.fake.last.toolResponses[0]!)[0]!.response.output).toMatchObject({
+      status: 'not_visible',
+      description: 'Not in the picture yet; still searching.',
+    });
+    expect(h.of('find').at(-1)!.state).toBe('searching');
+  });
+
+  it('validates arguments and reports unavailability as a tool error', async () => {
+    const h = await liveHarness({ vision: false });
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'b1', name: 'find_object', args: {} }] } });
+    h.fake.last.emit({ toolCall: { functionCalls: [{ id: 'b2', name: 'find_object', args: { query: 'cup' } }] } });
+    await flush();
+    const codes = h.fake.last.toolResponses.map((r) => responses(r)[0]!.response.error?.code);
+    expect(codes).toEqual(['invalid_arguments', 'find_unavailable']);
   });
 });

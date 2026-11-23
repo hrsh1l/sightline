@@ -1,6 +1,7 @@
 /**
  * One ClientSession per browser WebSocket. Mediates between the browser and Gemini Live (via LiveBridge),
- * runs the read_label / look_again tools, explicit UI actions and snapshot-mode answers.
+ * runs the read_label / look_again / find_object tools, explicit UI actions, snapshot-mode answers, object
+ * detection on small detect frames and find mode (image-relative aiming help).
  *
  * Invariants:
  *  - Media (audio/frames) is forwarded only while the bridge is live and the client is visible; it is
@@ -9,6 +10,8 @@
  *  - Tool calls are validated; unknown names get an error response and are never executed.
  *  - After dispose(), nothing further is sent to the provider or to the client.
  *  - Logs carry metadata only (event names, counts, latencies, codes) — never media, transcripts or prompts.
+ *  - detect.frame images go only to the detector / vision.locate, never to Gemini Live.
+ *  - At most one find per session; boxes come only from the detector or vision.locate (never invented).
  */
 import { randomUUID } from 'node:crypto';
 import type { FunctionCall, LiveServerContent, LiveServerMessage } from '@google/genai';
@@ -20,8 +23,11 @@ import {
   type ClientMessage,
   type ClientMessageOf,
   type ClientSettings,
+  type Detection,
   type ErrorCode,
   type FramePayload,
+  type NormalizedBox,
+  type ServerFind,
   type ServerMessage,
   type ServerMessageOf,
 } from '../../shared/protocol.js';
@@ -36,7 +42,16 @@ import { redactSecrets } from '../log.js';
 import { classifyProviderError, type ProviderErrorInfo } from '../live/errors.js';
 import { createLiveBridge, LiveConnectError, type LiveBridge } from '../live/LiveBridge.js';
 import { buildLiveConnectConfig } from '../live/liveConfig.js';
-import { compactEvidence, parseToolCall, type ToolName } from '../live/tools.js';
+import {
+  compactEvidence,
+  FIND_OBJECT_GUIDANCE,
+  FIND_OBJECT_NOT_VISIBLE_GUIDANCE,
+  FIND_SHARP_GUIDANCE,
+  parseToolCall,
+  type ToolName,
+} from '../live/tools.js';
+import { cocoMatch, isSharpQuery, pickTarget } from '../../shared/find.js';
+import { FindTracker, TERMINAL_FIND_STATES, type FindSource } from './findTracker.js';
 import { TurnTracker, type TurnState } from './turns.js';
 
 export interface ClientSessionOptions {
@@ -48,6 +63,12 @@ export interface ClientSessionOptions {
   sessionLimitNoticeMs?: number;
   /** Max concurrent vision requests (snapshot answers / explicit label reads) per session. */
   maxConcurrentVision?: number;
+  /** find_object waits this long for a first detection/locate result before answering the model. */
+  findToolWaitMs?: number;
+  /** Find-mode tick (lost / not_found checks). */
+  findTickMs?: number;
+  /** Abort a vision.locate call after this long (treated as "no update"). */
+  locateTimeoutMs?: number;
 }
 
 const HISTORY_TURNS = 6;
@@ -58,6 +79,45 @@ export const LIVE_READ_LABEL_PREFIX =
 export const LIVE_READ_LABEL_SUFFIX = ' Summarise the most useful part in one or two short sentences, then offer to read more.';
 export const LIVE_LOOK_AGAIN_TEXT = 'Look again at the newest image and answer my last question again, briefly.';
 export const LIVE_REPEAT_TEXT = 'Please repeat your last answer.';
+export const FIND_UNAVAILABLE_MESSAGE =
+  'Find is not available: this server has neither the object detector nor Gemini vision configured.';
+export const FIND_COCO_ONLY_MESSAGE =
+  'Without Gemini vision, find works only for common objects such as a cup, bottle, bowl, phone or book.';
+/** While detect.frame messages keep arriving, ambient (Live) frames are not also sent to the detector. */
+const DETECT_FRAME_ACTIVE_MS = 2_000;
+/** A locate result for a frame older than this is ignored (the camera has probably moved). */
+const LOCATE_RESULT_MAX_AGE_MS = 4_000;
+
+/** One-line app event telling Live the find target is centred (sent at most once per tool-started find). */
+export function centeredEventText(query: string): string {
+  const q = query.replace(/[[\]\r\n]/g, ' ').replace(/^\s*(the|a|an|my)\s+/i, '').trim().slice(0, 80);
+  const sharp = isSharpQuery(q) ? ' It may be sharp: do not guide their hand toward it.' : '';
+  return `[Sightline app event: the ${q} is now centred in the picture.] Confirm in at most six words.${sharp}`;
+}
+
+const clampBox = (b: NormalizedBox): NormalizedBox => {
+  const c = (v: number) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
+  const x = c(b.x);
+  const y = c(b.y);
+  return { x, y, w: Math.min(c(b.w), 1 - x), h: Math.min(c(b.h), 1 - y) };
+};
+
+interface ActiveFind {
+  id: number;
+  tracker: FindTracker;
+  viaTool: boolean;
+  /** Aborts an in-flight vision.locate when the find ends. */
+  ac: AbortController;
+  locateInFlight: boolean;
+  lastLocateAt: number;
+  locateFailures: number;
+  timeoutTimer: ReturnType<typeof setTimeout> | null;
+  tickTimer: ReturnType<typeof setTimeout> | null;
+  waiters: Set<(m: ServerFind) => void>;
+  centeredEventSent: boolean;
+  centeredEventPending: boolean;
+}
+
 export const MISSING_CREDENTIALS_MESSAGE =
   'The server has no Gemini API key configured. Add GEMINI_API_KEY to .env and restart.';
 
@@ -92,6 +152,9 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   const minFrameIntervalMs = opts.minFrameIntervalMs ?? 950;
   const sessionLimitNoticeMs = opts.sessionLimitNoticeMs ?? 60_000;
   const maxConcurrentVision = opts.maxConcurrentVision ?? 2;
+  const findToolWaitMs = opts.findToolWaitMs ?? 3_000;
+  const findTickMs = opts.findTickMs ?? 250;
+  const locateTimeoutMs = opts.locateTimeoutMs ?? 6_000;
   const sessionId = randomUUID();
 
   let phase: Phase = 'awaiting_hello';
@@ -110,6 +173,12 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   let lastAmbientFrameId = -1;
   let lastFrameForwardedAt = Number.NEGATIVE_INFINITY;
   let lastDetectionsFrameId = -1;
+  let lastDetectFrameId = -1;
+  let lastDetectFrameAt = Number.NEGATIVE_INFINITY;
+
+  // Find mode (one per session)
+  let find: ActiveFind | null = null;
+  let findCounter = 0;
 
   // Audio rate limiting
   let audioWindowStart = 0;
@@ -137,6 +206,11 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     toolRejected: 0,
     reconnects: 0,
     invalidMessages: 0,
+    detectFrames: 0,
+    detectFramesDropped: 0,
+    finds: 0,
+    locateCalls: 0,
+    locateFailures: 0,
   };
 
   // ---------------------------------------------------------------------------
@@ -172,6 +246,12 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     }, ms);
     timers.add(t);
     return t;
+  };
+
+  const cancelLater = (t: ReturnType<typeof setTimeout> | null) => {
+    if (!t) return;
+    clearTimeout(t);
+    timers.delete(t);
   };
 
   const newController = () => {
@@ -224,21 +304,119 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     return ok;
   }
 
-  function maybeDetect(frame: FramePayload) {
-    if (!settings.detections || !detector.enabled) return;
+  /** Run the local detector on a frame; marks/sends the find target when a YOLO find is active. */
+  function runDetector(frame: FramePayload) {
     const ac = newController();
     detector
       .detect(frame, ac.signal)
       .then((result) => {
-        if (disposed || !result || !settings.detections) return;
+        if (disposed || !result) return;
         if (result.frameId <= lastDetectionsFrameId) return;
+        const f = find && find.tracker.source === 'yolo' ? find : null;
+        if (!settings.detections && !f) return;
         lastDetectionsFrameId = result.frameId;
-        send({ ...result, type: 'detections', detections: result.detections.slice(0, LIMITS.maxDetections) });
+        let detections: Detection[] = result.detections.slice(0, LIMITS.maxDetections);
+        let target: Detection | null = null;
+        if (f) {
+          target = pickTarget(detections, f.tracker.query, f.tracker.previousBox);
+          if (target) detections = detections.map((d) => (d === target ? { ...d, target: true } : d));
+        }
+        const base = { ...result, type: 'detections' as const, source: 'yolo' as const };
+        if (settings.detections) send({ ...base, detections });
+        else if (target) send({ ...base, detections: [{ ...target, target: true }] });
+        if (f && find === f) {
+          const m = f.tracker.observe(result.frameId, target, Date.now());
+          if (m) emitFind(f, m);
+        }
       })
       .catch(() => {
         /* detector failures are reported by its own health(); never fabricate */
       })
       .finally(() => releaseController(ac));
+  }
+
+  /**
+   * Gemini box detection for the active find, at most every locateMinIntervalMs, one call in flight, aborted after
+   * locateTimeoutMs. A failed or slow locate is "no update": the last state stands until the lost / not_found timers.
+   */
+  function maybeLocate(f: ActiveFind, frame: FramePayload) {
+    if (!vision || f.locateInFlight || f.ac.signal.aborted) return;
+    const started = Date.now();
+    if (started - f.lastLocateAt < LIMITS.locateMinIntervalMs) return;
+    f.locateInFlight = true;
+    f.lastLocateAt = started;
+    counters.locateCalls++;
+    const query = f.tracker.query;
+    const callAc = new AbortController();
+    const onFindAbort = () => callAc.abort();
+    f.ac.signal.addEventListener('abort', onFindAbort, { once: true });
+    const timeout = later(locateTimeoutMs, () => callAc.abort());
+    const signal = callAc.signal;
+    vision
+      .locate({ frame, query, signal })
+      .then((res) => {
+        if (disposed || find !== f || f.ac.signal.aborted) return;
+        f.locateFailures = 0;
+        if (frameAgeMs(frame) > LOCATE_RESULT_MAX_AGE_MS) return; // too old to aim with
+        const detections: Detection[] = res.boxes.slice(0, LIMITS.maxDetections).map((b) => ({
+          label: (b.label.trim() || query).slice(0, 80),
+          score: Number.isFinite(b.score) ? Math.min(1, Math.max(0, b.score)) : 0,
+          box: clampBox(b.box),
+        }));
+        const target = pickTarget(detections, query, f.tracker.previousBox, { anyLabel: true, minScore: 0 });
+        if (detections.length) {
+          send({
+            type: 'detections',
+            frameId: frame.frameId,
+            capturedAt: frame.capturedAt,
+            sourceWidth: frame.width,
+            sourceHeight: frame.height,
+            detectedAt: Date.now(),
+            model: res.model.slice(0, 100),
+            detections: detections.map((d) => (d === target ? { ...d, target: true } : d)),
+            source: 'gemini',
+          });
+        }
+        const m = f.tracker.observe(frame.frameId, target, Date.now());
+        if (m) emitFind(f, m);
+      })
+      .catch((err: unknown) => {
+        if (disposed || find !== f || f.ac.signal.aborted) return;
+        f.locateFailures++;
+        counters.locateFailures++;
+        const v = visionFailure(err);
+        // Log once per failure streak start and then every 5th, metadata only.
+        if (f.locateFailures === 1 || f.locateFailures % 5 === 0) log.warn('locate_failed', { code: v.logCode, streak: f.locateFailures });
+      })
+      .finally(() => {
+        cancelLater(timeout);
+        f.ac.signal.removeEventListener('abort', onFindAbort);
+        f.locateInFlight = false;
+      });
+  }
+
+  /** Detection / find work for a frame (from detect.frame, or an ambient frame from an older client). */
+  function processDetectionFrame(frame: FramePayload) {
+    const f = find;
+    if (f && f.tracker.source === 'gemini') {
+      // The detector is not needed while Gemini tracks a specific item; frees it and keeps one box source.
+      maybeLocate(f, frame);
+      return;
+    }
+    if (detector.enabled && (settings.detections || f)) runDetector(frame);
+  }
+
+  function onDetectFrame(frame: FramePayload) {
+    const drop = () => {
+      counters.detectFramesDropped++;
+    };
+    if (paused || (phase !== 'live' && phase !== 'snapshot')) return drop();
+    if (frame.frameId <= lastDetectFrameId) return drop(); // stale / out of order
+    lastDetectFrameId = frame.frameId;
+    if (frameAgeMs(frame) > LIMITS.frameMaxAgeMs) return drop();
+    counters.detectFrames++;
+    lastDetectFrameAt = Date.now();
+    processDetectionFrame(frame); // never forwarded to Live
   }
 
   function onAmbientFrame(frame: FramePayload) {
@@ -249,8 +427,152 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     if (frame.frameId <= lastForwardedFrameId || frame.frameId <= lastAmbientFrameId) return drop(); // stale / out of order
     lastAmbientFrameId = frame.frameId;
     if (frameAgeMs(frame) > LIMITS.frameMaxAgeMs) return drop();
-    maybeDetect(frame);
+    if (Date.now() - lastDetectFrameAt > DETECT_FRAME_ACTIVE_MS) processDetectionFrame(frame);
     if (!forwardFrame(frame, false)) drop();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Find mode
+  // ---------------------------------------------------------------------------
+
+  function chooseFindSource(query: string): { source: FindSource } | { error: string } {
+    const coco = cocoMatch(query);
+    // Modified queries ("the red mug") go to Gemini when available: YOLO cannot tell which mug is red.
+    if (coco && detector.enabled && (coco.exact || !vision)) return { source: 'yolo' };
+    if (vision) return { source: 'gemini' };
+    if (detector.enabled) return { error: FIND_COCO_ONLY_MESSAGE };
+    return { error: FIND_UNAVAILABLE_MESSAGE };
+  }
+
+  function emitFind(f: ActiveFind, m: ServerFind) {
+    if (find !== f) return;
+    send(m);
+    for (const w of [...f.waiters]) w(m);
+    if (TERMINAL_FIND_STATES.has(m.state)) {
+      log.info('find_ended', { state: m.state, source: f.tracker.source, viaTool: f.viaTool });
+      cleanupFind(f);
+      return;
+    }
+    if (m.state === 'centered') maybeSendCenteredEvent(f);
+  }
+
+  function scheduleFindTick(f: ActiveFind) {
+    f.tickTimer = later(findTickMs, () => {
+      f.tickTimer = null;
+      if (find !== f) return;
+      const m = f.tracker.tick(Date.now());
+      if (m) emitFind(f, m);
+      if (find === f) scheduleFindTick(f);
+    });
+  }
+
+  function cleanupFind(f: ActiveFind) {
+    f.ac.abort();
+    releaseController(f.ac);
+    cancelLater(f.timeoutTimer);
+    cancelLater(f.tickTimer);
+    f.timeoutTimer = null;
+    f.tickTimer = null;
+    f.waiters.clear();
+    if (find === f) find = null;
+  }
+
+  /** End the active find. `silent` (a new find replaces it) resolves waiters without telling the client. */
+  function endFind(state: 'stopped' | 'timeout', silent = false) {
+    const f = find;
+    if (!f) return;
+    const m = f.tracker.stop(state, Date.now());
+    if (m) {
+      if (!silent) send(m);
+      for (const w of [...f.waiters]) w(m);
+    }
+    log.info('find_ended', { state, source: f.tracker.source, viaTool: f.viaTool });
+    cleanupFind(f);
+  }
+
+  function startFind(query: string, requestId: string | null, viaTool: boolean): ActiveFind | { error: string } {
+    const choice = chooseFindSource(query);
+    if ('error' in choice) return choice;
+    endFind('stopped', true);
+    const ac = newController();
+    const f: ActiveFind = {
+      id: ++findCounter,
+      tracker: new FindTracker({ query, requestId, source: choice.source, startedAt: Date.now() }),
+      viaTool,
+      ac,
+      locateInFlight: false,
+      lastLocateAt: Number.NEGATIVE_INFINITY,
+      locateFailures: 0,
+      timeoutTimer: null,
+      tickTimer: null,
+      waiters: new Set(),
+      centeredEventSent: false,
+      centeredEventPending: false,
+    };
+    find = f;
+    counters.finds++;
+    log.info('find_started', { source: choice.source, viaTool });
+    send(f.tracker.start(Date.now()));
+    f.timeoutTimer = later(LIMITS.findTimeoutMs, () => {
+      if (find === f) endFind('timeout');
+    });
+    scheduleFindTick(f);
+    return f;
+  }
+
+  function sendCenteredEvent(f: ActiveFind) {
+    f.centeredEventPending = false;
+    if (f.centeredEventSent || !liveReady() || paused) return;
+    f.centeredEventSent = true;
+    bridge!.sendClientContent({ turns: [{ role: 'user', parts: [{ text: centeredEventText(f.tracker.query) }] }], turnComplete: true });
+    log.info('find_centered_event', { source: f.tracker.source });
+  }
+
+  /** Tell Live (once per tool-started find) that the target is centred; waits for a turn boundary if mid-turn. */
+  function maybeSendCenteredEvent(f: ActiveFind) {
+    if (!f.viaTool || f.centeredEventSent) return;
+    const t = turns.active;
+    if (t && !t.cancelled) {
+      f.centeredEventPending = true; // best effort: after the current turn completes
+      return;
+    }
+    sendCenteredEvent(f);
+  }
+
+  /** Resolves with the first visible/terminal find update, or null after `ms`. Rejects with AbortedError on abort. */
+  function waitForFirstFindResult(f: ActiveFind, ms: number, signal: AbortSignal): Promise<ServerFind | null> {
+    return new Promise<ServerFind | null>((resolve, reject) => {
+      if (signal.aborted) return reject(new AbortedError('aborted'));
+      let timer: ReturnType<typeof setTimeout> | null = null;
+      const done = () => {
+        f.waiters.delete(waiter);
+        cancelLater(timer);
+        signal.removeEventListener('abort', onAbort);
+      };
+      const waiter = (m: ServerFind) => {
+        if (m.state === 'searching' || m.state === 'lost') return;
+        // The tool response itself will say it is centred: no separate app event needed.
+        if (m.state === 'centered') f.centeredEventSent = true;
+        done();
+        resolve(m);
+      };
+      const onAbort = () => {
+        done();
+        reject(new AbortedError('aborted'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      f.waiters.add(waiter);
+      timer = later(ms, () => {
+        done();
+        resolve(null);
+      });
+    });
+  }
+
+  function onFind(msg: ClientMessageOf<'find'>) {
+    if (rejectIfUnavailable(msg.requestId)) return;
+    const r = startFind(msg.query, msg.requestId, false);
+    if ('error' in r) sendError('detector_unavailable', r.error, true, { requestId: msg.requestId });
   }
 
   // ---------------------------------------------------------------------------
@@ -356,6 +678,26 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     return { output: { status: 'fresh_frame_sent', frameId: snap.frame.frameId, ageMs: Math.max(0, frameAgeMs(snap.frame)) } };
   }
 
+  async function toolFindObject(args: { query: string }, signal: AbortSignal): Promise<ToolResult> {
+    const sharp = isSharpQuery(args.query) ? FIND_SHARP_GUIDANCE : '';
+    const r = startFind(args.query, `tool-find-${findCounter + 1}`, true);
+    if ('error' in r) return toolError('find_unavailable', `${r.error} Tell the user briefly.`);
+    const first = await waitForFirstFindResult(r, findToolWaitMs, signal);
+    if (first && (first.state === 'tracking' || first.state === 'centered') && first.description) {
+      return { output: { status: first.state, description: first.description, guidance: FIND_OBJECT_GUIDANCE + sharp } };
+    }
+    const stillSearching = find === r;
+    return {
+      output: {
+        status: 'not_visible',
+        description: stillSearching ? 'Not in the picture yet; still searching.' : 'Not found in the picture.',
+        guidance: stillSearching
+          ? FIND_OBJECT_NOT_VISIBLE_GUIDANCE + sharp
+          : 'Tell the user in one short sentence that it was not found in the picture.',
+      },
+    };
+  }
+
   function respondToTool(id: string, name: string, response: ToolResult) {
     bridge?.sendToolResponse({ functionResponses: [{ id, name, response }] });
   }
@@ -376,7 +718,12 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     send({ type: 'tool', callId, name: parsed.name, state: 'started' });
     const started = Date.now();
     try {
-      const result = parsed.name === 'read_label' ? await toolReadLabel(parsed.args, ac.signal) : await toolLookAgain(ac.signal);
+      const result =
+        parsed.name === 'read_label'
+          ? await toolReadLabel(parsed.args, ac.signal)
+          : parsed.name === 'find_object'
+            ? await toolFindObject(parsed.args, ac.signal)
+            : await toolLookAgain(ac.signal);
       if (ac.signal.aborted || disposed) return;
       respondToTool(id, parsed.name, result);
       const failed = 'error' in result;
@@ -469,6 +816,8 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         pushHistory('user', t.userText);
         pushHistory('assistant', t.assistantText);
       }
+      const f = find;
+      if (f?.centeredEventPending && f.tracker.state === 'centered' && !turns.active) sendCenteredEvent(f);
       bridge?.reconnectIfGoAwayPending();
     }
   }
@@ -824,6 +1173,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       bridge!.sendRealtimeInput({ audioStreamEnd: true });
       audioStreamOpen = false;
     }
+    if (hidden) endFind('stopped');
     log.info('visibility', { hidden });
     if (phase === 'live' || phase === 'snapshot') sendStatus(statusForPhase());
   }
@@ -838,6 +1188,12 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         return onAudioEnd();
       case 'frame':
         return onAmbientFrame(msg.frame);
+      case 'detect.frame':
+        return onDetectFrame(msg.frame);
+      case 'find':
+        return onFind(msg);
+      case 'find.stop':
+        return endFind('stopped');
       case 'text':
         return onText(msg);
       case 'action':
@@ -860,6 +1216,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         settings = msg.settings;
         return;
       case 'bye':
+        endFind('stopped');
         dispose('bye');
         channel.close(1000, 'bye');
         return;
@@ -898,6 +1255,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
 
   function dispose(reason: string) {
     if (disposed) return;
+    if (find) cleanupFind(find);
     disposed = true;
     phase = 'disposed';
     for (const t of timers) clearTimeout(t);
