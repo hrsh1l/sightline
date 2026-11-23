@@ -29,25 +29,24 @@ function describeError(err: unknown): string {
   return redactSecrets(`${status ? `HTTP ${status}: ` : ''}${msg}`).slice(0, 300);
 }
 
-async function checkVision() {
-  const model = config.visionModel;
+async function checkVision(model: string, role: string) {
   try {
     const info = await ai.models.get({ model });
-    console.info(`[vision] models.get ${model}: ok (${info.displayName ?? info.name ?? 'no display name'})`);
+    console.info(`[${role}] models.get ${model}: ok (${info.displayName ?? info.name ?? 'no display name'})`);
   } catch (err) {
-    console.warn(`[vision] models.get ${model}: ${describeError(err)} (continuing with a generate call)`);
+    console.warn(`[${role}] models.get ${model}: ${describeError(err)} (continuing with a generate call)`);
   }
   const t0 = performance.now();
   try {
     const res = await ai.models.generateContent({
       model,
       contents: [{ role: 'user', parts: [{ text: 'Reply with the single word OK.' }] }],
-      config: { maxOutputTokens: 20 },
+      config: { maxOutputTokens: 512 }, // thinking tokens count against this limit
     });
-    console.info(`[vision] generateContent ${model}: ok in ${Math.round(performance.now() - t0)} ms (reply length ${res.text?.length ?? 0})`);
+    console.info(`[${role}] generateContent ${model}: ok in ${Math.round(performance.now() - t0)} ms (reply length ${res.text?.length ?? 0})`);
   } catch (err) {
     failed = true;
-    console.error(`[vision] generateContent ${model}: FAILED ${describeError(err)}`);
+    console.error(`[${role}] generateContent ${model}: FAILED ${describeError(err)}`);
   }
 }
 
@@ -116,6 +115,7 @@ async function checkLive() {
   }
 }
 
-await checkVision();
+await checkVision(config.visionModel, 'vision');
+if (config.locateModel !== config.visionModel) await checkVision(config.locateModel, 'locate');
 await checkLive();
 process.exit(failed ? 1 : 0);
