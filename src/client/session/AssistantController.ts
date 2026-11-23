@@ -678,8 +678,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     }
     if (!msg.recoverable) {
       noReconnect = true;
-      stopSampler();
-      clearBusy();
+      // The session cannot continue: release camera, microphone, playback and the socket now. (For
+      // missing credentials the UI returns to the Start screen, which has no End button.)
+      teardown();
+      setState({ busy: null, talking: false, detections: null, speaking: false });
       setConnection('error');
       setError({ code: msg.code, message: msg.message, recoverable: false, action: msg.code === 'missing_credentials' ? 'none' : 'retry' });
       return;
@@ -827,6 +829,30 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   // Public API
   // ---------------------------------------------------------------------------
 
+  /** Stop capture, transmission and playback and close the socket; after this nothing is sent. */
+  function teardown() {
+    epoch++;
+    active = false;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    if (detectionTimer) clearTimeout(detectionTimer);
+    detectionTimer = null;
+    if (busyTimer) clearTimeout(busyTimer);
+    busyTimer = null;
+    busyInfo = null;
+    stopSampler();
+    camera.stop();
+    mic.stop();
+    flushAllPlayback();
+    const sock = detachSocket();
+    if (sock) {
+      sock.send({ type: 'bye' });
+      sock.close(1000, 'bye');
+    }
+    detachVisibility();
+    paused = false;
+  }
+
   const MEDIA_RETRYABLE = new Set(['idle', 'denied', 'unavailable', 'in_use', 'disconnected', 'error', 'stopped']);
 
   async function retryFailedMedia() {
@@ -941,26 +967,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         if (state.connection !== 'idle' && state.connection !== 'ended') setConnection('ended');
         return;
       }
-      epoch++;
-      active = false;
-      if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-      if (detectionTimer) clearTimeout(detectionTimer);
-      detectionTimer = null;
-      if (busyTimer) clearTimeout(busyTimer);
-      busyTimer = null;
-      busyInfo = null;
-      stopSampler();
-      camera.stop();
-      mic.stop();
-      flushAllPlayback();
-      const sock = detachSocket();
-      if (sock) {
-        sock.send({ type: 'bye' });
-        sock.close(1000, 'bye');
-      }
-      detachVisibility();
-      paused = false;
+      teardown();
       setState({ connection: 'ended', busy: null, talking: false, detections: null, speaking: false });
       announce('Session ended.');
     },

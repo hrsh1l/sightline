@@ -153,7 +153,9 @@ export async function startServer(config: AppConfig = loadConfig(), overrides: S
       throw new Error('dist/client not found. Run `npm run build` first.');
     }
     app.use(express.static(clientDir, { index: false, maxAge: '1h' }));
-    app.get(/.*/, (_req, res) => res.sendFile(path.join(clientDir, 'index.html')));
+    // `root` makes send() check dotfiles only below clientDir; with an absolute path it refuses any project path
+    // containing a dot-directory (e.g. ~/.projects/sightline or a .claude/worktrees checkout) with 404.
+    app.get(/.*/, (_req, res) => res.sendFile('index.html', { root: clientDir }));
   }
 
   // WebSocket endpoint. Vite HMR shares the http server but uses its own subprotocol; we only claim WS_PATH.
