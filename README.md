@@ -79,7 +79,19 @@ Camera and microphone need a **secure context**: `http://localhost` or `https://
 
 Without the adb CLI: desktop Chrome › `chrome://inspect/#devices` › Port forwarding › `3000` → `localhost:3000`.
 
-**B. Wireless HTTPS (tunnel)** — the server refuses any non-localhost host unless `ACCESS_TOKEN` is set.
+**A2. Wireless debugging (same Wi-Fi, no cable)** — still `http://localhost:3000` on the phone, no token needed:
+
+```sh
+# Phone: Developer options › Wireless debugging › On › "Pair device with pairing code"
+adb pair <ip>:<pairing-port>       # enter the 6-digit code (one time)
+adb connect <ip>:<connect-port>    # the port shown on the main Wireless debugging screen
+adb reverse tcp:3000 tcp:3000
+```
+
+Re-run `adb connect` and `adb reverse` if the phone sleeps, changes network or Wireless debugging is toggled.
+Networks with client isolation (guest/corporate Wi-Fi) block this; use the HTTPS tunnel instead.
+
+**B. HTTPS tunnel (any network)** — the server refuses any non-localhost host unless `ACCESS_TOKEN` is set.
 
 ```sh
 openssl rand -hex 32                      # put it in .env as ACCESS_TOKEN=...

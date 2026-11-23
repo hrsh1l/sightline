@@ -15,7 +15,8 @@ That rules out the obvious shortcut:
 | Method | When | Needs |
 |---|---|---|
 | **A. USB + port forwarding (recommended)** | Development, demos at a desk | USB data cable, USB debugging |
-| **B. Wireless HTTPS tunnel** | Walking around without a cable | A tunnel tool, `ACCESS_TOKEN` in `.env` |
+| **A6. Wireless debugging + port forwarding** | No cable, phone and laptop on the same Wi-Fi | Android 11+ Wireless debugging, one-time pairing |
+| **B. Wireless HTTPS tunnel** | Different networks, or Wi-Fi that blocks device-to-device traffic | A tunnel tool, `ACCESS_TOKEN` in `.env` |
 
 Sources: [Android: access a local server](https://developer.android.com/develop/ui/views/layout/webapps/access-local-server),
 [Chrome DevTools: access local servers](https://developer.chrome.com/docs/devtools/remote-debugging/local-server).
@@ -97,6 +98,55 @@ USB debugging must still be enabled and authorised (A1, A3).
 6. On the phone, open `http://localhost:3000` in Chrome.
 
 Use either `adb reverse` or Chrome port forwarding for port 3000, not both at once.
+
+### A6. Wireless debugging (no cable, same Wi-Fi)
+
+This is `adb reverse` over Wi-Fi instead of USB. The phone still opens `http://localhost:3000`, so it is
+still a secure context, the server still sees loopback requests, and no tunnel or access token is needed.
+Requires Android 11+ (the S25 qualifies) and adb from A2.
+
+> Status: written from Android's documented wireless-debugging flow; not yet tried on the S25 in this project.
+
+1. Put the phone and the laptop on the **same Wi-Fi network**. Guest, hotel, corporate or university networks
+   often block device-to-device traffic ("client isolation"); if pairing never connects, use method B.
+2. On the phone: **Settings > Developer options > Wireless debugging** → turn it on → **Allow** for this
+   network. (Developer options must already be enabled: see A1.)
+3. Tap **Pair device with pairing code**. The phone shows an *IP address & port* and a *six-digit code*.
+4. On the laptop (use the IP:port from the pairing dialog):
+
+   ```sh
+   adb pair 192.168.1.23:37123        # enter the six-digit code when asked
+   ```
+
+   One-time: the laptop is remembered under **Paired devices**.
+5. Close the pairing dialog. The main Wireless debugging screen shows a **different** *IP address & port*
+   (the connection port). Connect to that one:
+
+   ```sh
+   adb connect 192.168.1.23:41234
+   adb devices                        # shows 192.168.1.23:41234   device
+   ```
+
+   (`adb mdns services` may list the phone automatically if mDNS works on your network.)
+6. Start the server and forward the port exactly as in A4:
+
+   ```sh
+   npm run dev
+   adb reverse tcp:3000 tcp:3000
+   adb reverse --list
+   ```
+
+   If a USB connection is also active, pick the device: `adb -s 192.168.1.23:41234 reverse tcp:3000 tcp:3000`.
+7. On the phone, open **`http://localhost:3000`** in Chrome.
+
+Notes:
+- The connection port changes whenever Wireless debugging is toggled or the phone changes network, and the
+  phone turns Wireless debugging off when it leaves that network. When the app stops connecting, check
+  `adb devices`, re-run `adb connect <ip:port>` (no re-pairing needed) and `adb reverse tcp:3000 tcp:3000`.
+- Screen-off or battery saver can drop the link. Keep the phone awake while testing.
+- Audio and frames travel over Wi-Fi, so latency may be a little higher and less steady than over USB.
+  Compare the diagnostics latency values between USB and wireless before choosing one for the demo.
+- Turn Wireless debugging off when you finish.
 
 ---
 
