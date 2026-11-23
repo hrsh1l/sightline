@@ -217,6 +217,8 @@ export const ClientHello = z.object({
   protocolVersion: z.literal(PROTOCOL_VERSION),
   mode: SessionMode,
   settings: ClientSettings,
+  /** Client Date.now() when sending hello; server estimates clock skew (phone vs laptop) for frame-age checks. */
+  clientTime: z.number().int().positive(),
   /** Set when reconnecting after a network loss; server may resume the provider session. */
   resume: z.boolean().optional(),
 });
