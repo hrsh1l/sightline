@@ -255,6 +255,15 @@ describe('extractLabel two-pass detail read', () => {
     expect(calls).toHaveLength(1);
   });
 
+  it('refuses to decode frames over the pixel cap and reads them single-pass instead', async () => {
+    const huge = await sharp({ create: { width: 6000, height: 5000, channels: 3, background: '#ffffff' } }).jpeg().toBuffer();
+    const { ai, calls } = fakeAi([FIXTURE_EXTRACTION]);
+    const log = createMemoryLogger();
+    await createGeminiVision({ ai, config, log }).extractLabel({ frame: { ...photo, width: 4096, height: 3413, data: huge.toString('base64') }, now: NOW });
+    expect(calls).toHaveLength(1);
+    expect(log.events.find((e) => e.event === 'vision_extract')!.fields).toMatchObject({ mode: 'single', detailSkipped: 'decode' });
+  });
+
   it('skips pass 1 for small frames (single HIGH read)', async () => {
     const small = await sharp({ create: { width: 800, height: 600, channels: 3, background: '#ffffff' } }).jpeg().toBuffer();
     const { ai, calls } = fakeAi([FIXTURE_EXTRACTION]);

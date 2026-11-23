@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CameraController, CameraState, CameraStatus, CapturedFrame, CaptureOptions } from '../contracts.js';
 import { LIMITS } from '../../shared/protocol.js';
-import { createFrameSampler } from './FrameSampler.js';
+import { createFrameSampler, effectiveIntervalMs } from './FrameSampler.js';
 
 function fakeCamera(initial: CameraStatus = 'active') {
   let status = initial;
@@ -125,5 +125,33 @@ describe('FrameSampler', () => {
     expect(onFrame).not.toHaveBeenCalled();
     expect(s.latest()).toBeNull();
     expect(capture).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('FrameSampler minIntervalMs (detection sampler)', () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ now: 1_700_000_000_000 });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('effectiveIntervalMs: default floor is the Live 1 FPS limit; minIntervalMs lowers it but never below 250 ms', () => {
+    expect(effectiveIntervalMs({ intervalMs: 250 })).toBe(LIMITS.liveFrameMinIntervalMs);
+    expect(effectiveIntervalMs({ intervalMs: 250, minIntervalMs: LIMITS.detectFrameMinIntervalMs })).toBe(250);
+    expect(effectiveIntervalMs({ intervalMs: 50, minIntervalMs: 10 })).toBe(LIMITS.detectFrameMinIntervalMs);
+    expect(effectiveIntervalMs({ intervalMs: 500, minIntervalMs: 250 })).toBe(500);
+    expect(effectiveIntervalMs({ intervalMs: Number.NaN, minIntervalMs: Number.NaN })).toBe(LIMITS.liveFrameMinIntervalMs);
+  });
+
+  it('samples at 4 FPS when allowed, and is clamped to 250 ms when asked for faster', async () => {
+    const { cam, capture, captureTimes } = fakeCamera();
+    const s = createFrameSampler(cam, { intervalMs: 100, minIntervalMs: 50, maxDim: 640, jpegQuality: 0.6 }, { document: visible });
+    s.start(() => {});
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(capture).toHaveBeenCalledTimes(5); // t = 0, 250, 500, 750, 1000
+    for (let i = 1; i < captureTimes.length; i++) expect(captureTimes[i]! - captureTimes[i - 1]!).toBeGreaterThanOrEqual(LIMITS.detectFrameMinIntervalMs);
+    expect(capture.mock.calls[0]![0]).toEqual({ maxDim: 640, jpegQuality: 0.6 });
+    s.stop();
   });
 });

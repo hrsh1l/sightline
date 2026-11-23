@@ -187,9 +187,17 @@ export interface EncodedImage {
   height: number;
 }
 
-/** Decode a base64 JPEG once to raw pixels so several crops do not re-decode the full frame. */
+/**
+ * Decode a base64 JPEG once to raw pixels so several crops do not re-decode the full frame. The input comes from
+ * the client, so the pixel count is capped (a small JPEG can declare huge dimensions): 25 MP covers a 4096 x 4096
+ * detail still with margin (~75 MB raw RGB).
+ */
+export const MAX_DECODE_PIXELS = 25_000_000;
+
 export async function decodeImage(base64: string): Promise<DecodedImage> {
-  const { data, info } = await sharp(Buffer.from(base64, 'base64')).raw().toBuffer({ resolveWithObject: true });
+  const { data, info } = await sharp(Buffer.from(base64, 'base64'), { limitInputPixels: MAX_DECODE_PIXELS })
+    .raw()
+    .toBuffer({ resolveWithObject: true });
   return { data, width: info.width, height: info.height, channels: info.channels };
 }
 

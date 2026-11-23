@@ -1,18 +1,23 @@
 /**
  * Ambient frame sampler for the Live session.
  *
- * Gemini Live accepts JPEG frames at up to 1 FPS, so the interval is clamped to
- * LIMITS.liveFrameMinIntervalMs. There is a single latest-frame slot and no queue: ticks are
+ * Gemini Live accepts JPEG frames at up to 1 FPS, so by default the interval is clamped to
+ * LIMITS.liveFrameMinIntervalMs. A sampler whose frames never reach Live (object detection / find tracking)
+ * may lower that floor with minIntervalMs, but never below LIMITS.detectFrameMinIntervalMs (4 FPS).
+ * There is a single latest-frame slot and no queue: ticks are
  * scheduled with chained setTimeout at a fixed cadence, and a tick that fires while the previous
  * capture is still encoding is skipped (counted in droppedCount) rather than queued.
  */
-import type { CameraController, CapturedFrame, FrameSampler } from '../contracts.js';
+import type { CameraController, CapturedFrame, FrameSampler, FrameSamplerConfig } from '../contracts.js';
 import { LIMITS } from '../../shared/protocol.js';
 
-export interface FrameSamplerOptions {
-  intervalMs: number;
-  maxDim: number;
-  jpegQuality: number;
+export type FrameSamplerOptions = FrameSamplerConfig;
+
+/** Effective sampling interval: max(intervalMs, floor) where floor = minIntervalMs (default 1 FPS) clamped to >= 250 ms. */
+export function effectiveIntervalMs(opts: Pick<FrameSamplerConfig, 'intervalMs' | 'minIntervalMs'>): number {
+  const requestedFloor = opts.minIntervalMs !== undefined && Number.isFinite(opts.minIntervalMs) ? opts.minIntervalMs : LIMITS.liveFrameMinIntervalMs;
+  const floor = Math.max(LIMITS.detectFrameMinIntervalMs, requestedFloor);
+  return Math.max(floor, Number.isFinite(opts.intervalMs) ? opts.intervalMs : 0);
 }
 
 export interface FrameSamplerDeps {
@@ -27,7 +32,7 @@ export function createFrameSampler(
   opts: FrameSamplerOptions,
   deps: FrameSamplerDeps = {},
 ): FrameSampler {
-  const intervalMs = Math.max(LIMITS.liveFrameMinIntervalMs, Number.isFinite(opts.intervalMs) ? opts.intervalMs : 0);
+  const intervalMs = effectiveIntervalMs(opts);
   const now = deps.now ?? (() => Date.now());
   const doc = deps.document ?? (typeof document !== 'undefined' ? document : undefined);
 

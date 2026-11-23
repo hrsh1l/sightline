@@ -5,9 +5,15 @@
  */
 import type { ImageDataLike } from './frameQuality.js';
 
+/** Clockwise rotation applied while drawing (still photos delivered in sensor orientation). Never a mirror. */
+export type SurfaceRotation = 0 | 90 | 270;
+
 export interface FrameSurface {
-  /** Draw the full source frame into the whole surface. Identity transform: never mirrored. */
-  draw(source: CanvasImageSource): void;
+  /**
+   * Draw the full source frame into the whole surface. Never mirrored. With rotation 90/270 the source is rotated
+   * clockwise by that angle, so the surface's width/height are the source's height/width (scaled).
+   */
+  draw(source: CanvasImageSource, rotation?: SurfaceRotation): void;
   /** Encode the current pixels as JPEG; resolves to base64 WITHOUT a data: prefix. */
   encodeJpeg(quality: number): Promise<string>;
   /** Small RGBA copy (longest side <= maxSide) for frame statistics, or null if unsupported. */
@@ -58,9 +64,22 @@ export function createCanvasSurfaceFactory(doc: Document | undefined = globalThi
     // alpha:false: JPEG has no alpha and an opaque canvas avoids premultiplication work.
     const ctx = context2d(canvas, { alpha: false });
     return {
-      draw(source) {
+      draw(source, rotation = 0) {
         ctx.setTransform(1, 0, 0, 1, 0, 0);
-        ctx.drawImage(source, 0, 0, width, height);
+        if (rotation === 90) {
+          // (u, v) -> (width - v, u): source top-left lands top-right.
+          ctx.translate(width, 0);
+          ctx.rotate(Math.PI / 2);
+          ctx.drawImage(source, 0, 0, height, width);
+        } else if (rotation === 270) {
+          // (u, v) -> (v, height - u): source top-left lands bottom-left.
+          ctx.translate(0, height);
+          ctx.rotate(-Math.PI / 2);
+          ctx.drawImage(source, 0, 0, height, width);
+        } else {
+          ctx.drawImage(source, 0, 0, width, height);
+        }
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
       },
       async encodeJpeg(quality) {
         // The canvas bitmap is copied synchronously when encoding starts (per the HTML spec for

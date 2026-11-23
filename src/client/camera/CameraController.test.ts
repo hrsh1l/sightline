@@ -125,12 +125,23 @@ describe('CameraController: start and errors', () => {
     expect(getUserMedia).not.toHaveBeenCalled();
   });
 
-  it('requests video only with a rear-camera preference', async () => {
+  it('requests video only with a rear-camera preference, 2560x1440 first', async () => {
     const { cam, getUserMedia } = setup();
     await cam.start();
     expect(cam.getState().status).toBe('active');
     expect(getUserMedia).toHaveBeenCalledTimes(1);
     expect(getUserMedia.mock.calls[0]![0]).toEqual({
+      audio: false,
+      video: { facingMode: { ideal: 'environment' }, width: { ideal: 2560 }, height: { ideal: 1440 } },
+    });
+  });
+
+  it('keeps 1920x1080 as the next option when the 2560x1440 stream cannot start', async () => {
+    const { cam, getUserMedia, tracks } = setup();
+    getUserMedia.mockRejectedValueOnce(domErr('NotReadableError')).mockResolvedValueOnce(fakeStream(...tracks));
+    await cam.start();
+    expect(cam.getState().status).toBe('active');
+    expect(getUserMedia.mock.calls[1]![0]).toEqual({
       audio: false,
       video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } },
     });
@@ -159,7 +170,8 @@ describe('CameraController: start and errors', () => {
     await cam.start();
     expect(cam.getState().status).toBe('in_use');
     expect(cam.getState().message).toMatch(/another app/);
-    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    // One retry at 1920x1080 (the > 1080p request may be what failed), then no further fallbacks.
+    expect(getUserMedia).toHaveBeenCalledTimes(2);
   });
 
   it('falls back to the next constraint on OverconstrainedError', async () => {
@@ -168,15 +180,16 @@ describe('CameraController: start and errors', () => {
     await cam.start();
     expect(cam.getState().status).toBe('active');
     expect(getUserMedia).toHaveBeenCalledTimes(2);
-    expect(getUserMedia.mock.calls[1]![0]).toEqual({ audio: false, video: { facingMode: { ideal: 'environment' } } });
+    expect(getUserMedia.mock.calls[1]![0]).toEqual({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
   });
 
   it('ends with {video:true} and then reports unavailable when nothing matches', async () => {
     const { cam, getUserMedia } = setup();
     getUserMedia.mockRejectedValue(domErr('NotFoundError'));
     await cam.start();
-    expect(getUserMedia).toHaveBeenCalledTimes(3);
-    expect(getUserMedia.mock.calls[2]![0]).toEqual({ audio: false, video: true });
+    expect(getUserMedia).toHaveBeenCalledTimes(4);
+    expect(getUserMedia.mock.calls[2]![0]).toEqual({ audio: false, video: { facingMode: { ideal: 'environment' } } });
+    expect(getUserMedia.mock.calls[3]![0]).toEqual({ audio: false, video: true });
     expect(cam.getState().status).toBe('unavailable');
   });
 
@@ -342,10 +355,11 @@ describe('CameraController: lifecycle', () => {
     getUserMedia
       .mockRejectedValueOnce(domErr('OverconstrainedError'))
       .mockRejectedValueOnce(domErr('OverconstrainedError'))
+      .mockRejectedValueOnce(domErr('OverconstrainedError'))
       .mockResolvedValueOnce(fakeStream(new FakeTrack()));
     await cam.switchCamera();
     expect(cam.getState()).toMatchObject({ status: 'active', facing: 'environment' });
-    expect(getUserMedia.mock.calls[3]![0]).toMatchObject({ video: { deviceId: { exact: 'rear' } } });
+    expect(getUserMedia.mock.calls[4]![0]).toMatchObject({ video: { deviceId: { exact: 'rear' } } });
   });
 });
 
