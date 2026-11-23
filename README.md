@@ -135,6 +135,7 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `LIVE_MODEL` | `gemini-3.8-live` | Live (native audio) model |
 | `VISION_MODEL` | `gemini-3.6-flash` | Label reading and snapshot answers |
 | `LIVE_VOICE` | `Kore` | Prebuilt voice |
+| `ASSISTANT_LANGUAGE` | `English` | Reply language; Sightline won't switch because of printed text or background speech |
 | `PORT` / `HOST` | `3000` / `127.0.0.1` | 127.0.0.1 is enough for adb reverse and tunnels |
 | `ACCESS_TOKEN` | — | Required for any non-localhost host (tunnel/deployment) |
 | `ALLOWED_ORIGINS` | — | Extra WebSocket origins if a proxy rewrites Host |

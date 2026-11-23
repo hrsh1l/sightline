@@ -525,7 +525,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       connector,
       model: config.liveModel,
       buildConfig: (handle) =>
-        buildLiveConnectConfig({ voiceName: config.liveVoice, timeZone: config.timeZone, now: clock(), resumptionHandle: handle }),
+        buildLiveConnectConfig({ voiceName: config.liveVoice, language: config.language, timeZone: config.timeZone, now: clock(), resumptionHandle: handle }),
       log,
       reconnectDelaysMs: opts.reconnectDelaysMs,
       connectTimeoutMs: opts.connectTimeoutMs,

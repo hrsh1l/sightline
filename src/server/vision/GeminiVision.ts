@@ -417,7 +417,7 @@ export function createGeminiVision(deps: {
             },
           ],
           config: {
-            systemInstruction: buildAnswerInstruction(now, config.timeZone),
+            systemInstruction: buildAnswerInstruction(now, config.timeZone, config.language),
             maxOutputTokens: 2_048,
           },
         },

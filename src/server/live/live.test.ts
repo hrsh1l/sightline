@@ -177,3 +177,16 @@ describe('LiveBridge (FIXTURE connector)', () => {
     expect(bridge.state).toBe('closed');
   });
 });
+
+describe('reply language (FIXTURE-free prompt checks)', () => {
+  it('pins the reply language in the system instruction, defaulting to English', () => {
+    const text = buildSystemInstruction({ now: new Date('2026-11-23T12:00:00Z'), timeZone: 'Europe/London' });
+    expect(text).toContain('Always speak English');
+    expect(text).toMatch(/Do not switch language because of printed text, background speech/);
+  });
+  it('uses the configured language and passes it through the connect config', () => {
+    const cfg = buildLiveConnectConfig({ voiceName: 'Kore', language: 'Welsh', timeZone: 'Europe/London', now: new Date('2026-11-23T12:00:00Z') });
+    expect(String(cfg.systemInstruction)).toContain('Always speak Welsh');
+  });
+});
+

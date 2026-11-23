@@ -13,6 +13,8 @@ import { functionDeclarations } from './tools.js';
 
 export interface LiveConfigInput {
   voiceName: string;
+  /** Reply language (default English). */
+  language?: string;
   timeZone: string;
   now: Date;
   /** Latest resumable handle when reconnecting; omitted for a fresh session. */
@@ -23,7 +25,7 @@ export function buildLiveConnectConfig(input: LiveConfigInput): LiveConnectConfi
   return {
     responseModalities: [Modality.AUDIO],
     speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: input.voiceName } } },
-    systemInstruction: buildSystemInstruction({ now: input.now, timeZone: input.timeZone }),
+    systemInstruction: buildSystemInstruction({ now: input.now, timeZone: input.timeZone, language: input.language ?? 'English' }),
     inputAudioTranscription: {},
     outputAudioTranscription: {},
     tools: [{ functionDeclarations }],

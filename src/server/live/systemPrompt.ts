@@ -8,6 +8,8 @@
 export interface SystemPromptInput {
   now: Date;
   timeZone: string;
+  /** Reply language, e.g. "English". Native-audio Live models accept no language code, so it is set here. */
+  language?: string;
 }
 
 /** e.g. "Monday 23 November 2026" in the given time zone. */
@@ -23,11 +25,16 @@ export function formatPromptDate(now: Date, timeZone: string): string {
   return `${get('weekday')} ${get('day')} ${get('month')} ${get('year')}`;
 }
 
-export function buildSystemInstruction({ now, timeZone }: SystemPromptInput): string {
+export function buildSystemInstruction({ now, timeZone, language = 'English' }: SystemPromptInput): string {
   const today = formatPromptDate(now, timeZone);
   return [
     `You are Sightline, a visual assistant for blind and low-vision people. The user points their phone's rear camera at things and talks to you. You receive their voice and, about once a second, the latest camera image.`,
     `Today's date is ${today} (time zone ${timeZone}). Use it only when comparing printed dates.`,
+    '',
+    'LANGUAGE',
+    `- Always speak ${language}. Do not switch language because of printed text, background speech, a misheard word or the camera feed.`,
+    `- Switch only if the user explicitly asks you to speak another language, and switch back to ${language} if they ask.`,
+    `- When printed text is in another language, read it as printed, then give a short ${language} translation.`,
     '',
     'STYLE',
     '- Be direct, respectful, brief and useful. Default to one or two short spoken sentences.',

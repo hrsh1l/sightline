@@ -12,6 +12,7 @@ const EnvSchema = z.object({
   LIVE_MODEL: z.string().min(1).default('gemini-3.8-live'),
   VISION_MODEL: z.string().min(1).default('gemini-3.6-flash'),
   LIVE_VOICE: z.string().min(1).default('Kore'),
+  ASSISTANT_LANGUAGE: z.string().trim().min(2).max(40).regex(/^[A-Za-z ()-]+$/).default('English'),
   PORT: z.coerce.number().int().min(1).max(65535).default(3000),
   HOST: z.string().min(1).default('127.0.0.1'),
   ACCESS_TOKEN: z.string().optional(),
@@ -32,6 +33,8 @@ export interface AppConfig {
   liveModel: string;
   visionModel: string;
   liveVoice: string;
+  /** Language the assistant always speaks unless the user explicitly asks to switch (native-audio Live models take no language code). */
+  language: string;
   port: number;
   host: string;
   accessToken: string | null;
@@ -71,6 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     liveModel: e.LIVE_MODEL,
     visionModel: e.VISION_MODEL,
     liveVoice: e.LIVE_VOICE,
+    language: e.ASSISTANT_LANGUAGE,
     port: e.PORT,
     host: e.HOST,
     accessToken: blank(e.ACCESS_TOKEN),
