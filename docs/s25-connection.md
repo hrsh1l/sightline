@@ -121,9 +121,10 @@ HOST=127.0.0.1                # keep this: the tunnel client connects to localho
 
 ### B2. Run a production build
 
-Use the built app behind a tunnel. The dev server's Vite middleware rejects requests whose `Host` header
-isn't localhost ("Blocked request. This host ... is not allowed"), and the hot-reload channel isn't
-needed on the phone.
+Use the built app behind a tunnel: it is faster to load on the phone and the hot-reload channel isn't
+needed. (`npm run dev` also works through a tunnel once `ACCESS_TOKEN` is set — the server then relaxes
+Vite's Host allow-list because its own access gate already protects every request. Without a token,
+non-localhost hosts are refused either way.)
 
 ```sh
 npm run build

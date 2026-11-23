@@ -129,7 +129,9 @@ export async function startServer(config: AppConfig = loadConfig()) {
     const vite = await createVite({
       root: projectRoot,
       configFile: path.join(projectRoot, 'vite.config.ts'),
-      server: { middlewareMode: true, hmr: { server: httpServer } },
+      // Our access gate (above) already refuses non-loopback hosts unless ACCESS_TOKEN is set, so when a token
+      // is configured Vite's own Host allow-list would only block legitimate HTTPS-tunnel access in dev mode.
+      server: { middlewareMode: true, hmr: { server: httpServer }, ...(config.accessToken ? { allowedHosts: true as const } : {}) },
       appType: 'spa',
     });
     app.use(vite.middlewares);
