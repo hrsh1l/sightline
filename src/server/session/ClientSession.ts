@@ -514,6 +514,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     features: { live: mode === 'live', snapshot: vision !== null, detections: detector.enabled },
     serverTime: Date.now(),
     maxSessionMs: config.maxSessionMs,
+    timeZone: config.timeZone,
   });
 
   async function connectLive() {
@@ -681,6 +682,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         features: { live: false, snapshot: vision !== null, detections: detector.enabled },
         serverTime: Date.now(),
         maxSessionMs: config.maxSessionMs,
+    timeZone: config.timeZone,
       });
       sendError('missing_credentials', MISSING_CREDENTIALS_MESSAGE, false);
       if (vision) sendStatus('snapshot');

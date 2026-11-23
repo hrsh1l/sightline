@@ -64,7 +64,7 @@ export function SessionScreen({
         </div>
       </div>
 
-      {state.lastEvidence && <EvidencePanel evidence={state.lastEvidence} />}
+      {state.lastEvidence && <EvidencePanel evidence={state.lastEvidence} timeZone={state.server?.timeZone ?? null} />}
       <Transcript entries={state.transcript} controller={controller} />
     </div>
   );

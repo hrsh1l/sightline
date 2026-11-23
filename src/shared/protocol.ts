@@ -325,6 +325,8 @@ export const ServerReady = z.object({
   /** Server epoch ms; lets the client estimate clock skew for latency metrics. */
   serverTime: z.number().int(),
   maxSessionMs: z.number().int().positive(),
+  /** IANA timezone used for date comparisons on packaging (e.g. Europe/London). */
+  timeZone: z.string().max(64).optional(),
 });
 
 export const ServerStatus = z.object({

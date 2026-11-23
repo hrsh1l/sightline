@@ -159,21 +159,26 @@ export const DATE_STATUS_TEXT: Record<DateInterpretation['status'], string> = {
   unparseable: 'Could not interpret',
 };
 
-/**
- * The server compares against its configured time zone (APP_TIMEZONE, Europe/London by default).
- * ServerInfo does not yet expose it; see contract change request in the interface report.
- */
-export const COMPARISON_PLACE = 'London';
+/** The server compares against its configured time zone (APP_TIMEZONE, Europe/London by default). */
+export const DEFAULT_TIME_ZONE = 'Europe/London';
+
+/** "Europe/London" -> "London"; falls back to the raw zone id. */
+export function placeForTimeZone(timeZone: string | null | undefined): string {
+  const zone = timeZone || DEFAULT_TIME_ZONE;
+  const last = zone.split('/').pop() ?? zone;
+  return last.replace(/_/g, ' ') || zone;
+}
 
 /** Neutral comparison only. Never a safety judgement. */
-export function comparisonText(c: DateInterpretation['comparison']): string {
+export function comparisonText(c: DateInterpretation['comparison'], timeZone?: string | null): string {
+  const place = placeForTimeZone(timeZone);
   switch (c) {
     case 'past':
-      return `Printed date is in the past relative to today in ${COMPARISON_PLACE}.`;
+      return `Printed date is in the past relative to today in ${place}.`;
     case 'today':
-      return `Printed date is today in ${COMPARISON_PLACE}.`;
+      return `Printed date is today in ${place}.`;
     case 'future':
-      return `Printed date is in the future relative to today in ${COMPARISON_PLACE}.`;
+      return `Printed date is in the future relative to today in ${place}.`;
     case 'unknown':
       return 'Could not compare the printed date with today.';
   }

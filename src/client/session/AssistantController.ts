@@ -550,6 +550,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         visionModel: msg.models.vision,
         detector: msg.features.detections,
         sessionId: msg.sessionId,
+        timeZone: msg.timeZone ?? null,
       },
     });
     if (busyInfo?.kind === 'connecting') clearBusy();

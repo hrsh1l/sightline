@@ -23,7 +23,7 @@ function groupBySection(exact: LabelEvidence['exactText']): Array<{ section: Tex
  * The latest label reading. Verbatim text and Sightline's interpretation are kept in clearly separate
  * sections so a user can tell what was printed from what was inferred.
  */
-export function EvidencePanel({ evidence }: { evidence: LabelEvidence }) {
+export function EvidencePanel({ evidence, timeZone = null }: { evidence: LabelEvidence; timeZone?: string | null }) {
   const groups = groupBySection(evidence.exactText);
   const time = new Date(evidence.capturedAt).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
@@ -84,7 +84,7 @@ export function EvidencePanel({ evidence }: { evidence: LabelEvidence }) {
                 <p>
                   <span className="field-name">Interpretation:</span> {dateInterpretationText(d)}
                 </p>
-                <p>{comparisonText(d.interpretation.comparison)}</p>
+                <p>{comparisonText(d.interpretation.comparison, timeZone)}</p>
               </li>
             ))}
           </ul>

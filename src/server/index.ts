@@ -14,7 +14,7 @@ import { GoogleGenAI } from '@google/genai';
 import { LIMITS, WS_PATH, type HealthResponse, type ServerMessage } from '../shared/protocol.js';
 import { loadConfig, type AppConfig } from './config.js';
 import { createLogger } from './log.js';
-import type { ClientChannel, LiveConnector } from './contracts.js';
+import type { ClientChannel, DetectorService, LiveConnector, Logger, VisionService } from './contracts.js';
 import { ACCESS_COOKIE, accessCookieValue, checkAccess, checkOrigin, isSecureRequest, safeEqual } from './http/security.js';
 import { createClientSession } from './session/ClientSession.js';
 import { createGeminiVision } from './vision/GeminiVision.js';
@@ -58,12 +58,24 @@ export function createChannel(ws: WebSocket): ClientChannel {
   };
 }
 
-export async function startServer(config: AppConfig = loadConfig()) {
-  const log = createLogger();
+/**
+ * Test-only injection points. Automated tests use these to run the real HTTP/WS server with clearly labelled
+ * FIXTURE providers. The production entry point (bottom of this file) never passes overrides.
+ */
+export interface ServerOverrides {
+  liveConnector?: LiveConnector | null;
+  vision?: VisionService | null;
+  detector?: DetectorService;
+  log?: Logger;
+}
+
+export async function startServer(config: AppConfig = loadConfig(), overrides: ServerOverrides = {}) {
+  const log = overrides.log ?? createLogger();
   const ai = config.geminiApiKey ? new GoogleGenAI({ apiKey: config.geminiApiKey, httpOptions: { apiVersion: 'v1beta' } }) : null;
-  const liveConnector: LiveConnector | null = ai ? (params) => ai.live.connect(params) : null;
-  const vision = ai ? createGeminiVision({ ai, config, log }) : null;
-  const detector = createDetector({ config, log });
+  const liveConnector: LiveConnector | null =
+    'liveConnector' in overrides ? (overrides.liveConnector ?? null) : ai ? (params) => ai.live.connect(params) : null;
+  const vision = 'vision' in overrides ? (overrides.vision ?? null) : ai ? createGeminiVision({ ai, config, log }) : null;
+  const detector = overrides.detector ?? createDetector({ config, log });
   const clock = () => (config.fakeNow ? new Date(config.fakeNow) : new Date());
 
   const app = express();
@@ -109,7 +121,7 @@ export async function startServer(config: AppConfig = loadConfig()) {
     const body: HealthResponse = {
       ok: true,
       version: pkgVersion,
-      configured: config.geminiApiKey !== null,
+      configured: liveConnector !== null || vision !== null,
       models: { live: config.liveModel, vision: config.visionModel },
       detector: await detector.health(),
       accessGate: config.accessToken !== null,
@@ -206,7 +218,7 @@ export async function startServer(config: AppConfig = loadConfig()) {
   await new Promise<void>((resolve) => httpServer.listen(config.port, config.host, resolve));
   log.info('listening', {
     url: `http://${config.host === '0.0.0.0' ? 'localhost' : config.host}:${config.port}`,
-    configured: config.geminiApiKey !== null,
+    configured: liveConnector !== null,
     liveModel: config.liveModel,
     visionModel: config.visionModel,
     detector: detector.enabled,
@@ -216,7 +228,7 @@ export async function startServer(config: AppConfig = loadConfig()) {
   if (detector.enabled) {
     void detector.health().then((h) => log.info('detector_health', { status: h, model: detector.model }));
   }
-  if (!config.geminiApiKey) {
+  if (!liveConnector && !vision) {
     log.warn('missing_credentials', { hint: 'Set GEMINI_API_KEY in .env (see .env.example). UI and tests still run.' });
   }
 

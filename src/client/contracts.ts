@@ -229,6 +229,8 @@ export interface ServerInfo {
   visionModel: string | null;
   detector: boolean;
   sessionId: string | null;
+  /** IANA timezone the server uses for date comparisons, when known. */
+  timeZone: string | null;
 }
 
 export interface AssistantState {

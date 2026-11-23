@@ -29,11 +29,24 @@ Status values: `todo`, `in progress`, `done (verified: …)`, `deferred`, `block
 | # | Task | Owner | Status |
 |---|---|---|---|
 | 1 | Scaffold, contracts, server assembly, health, access gate, origin check | lead | done (verified: typecheck, lint, curl smoke test) |
-| 2 | Camera controller, sampler, frame quality, S25 connection doc | camera | in progress |
-| 3 | Live bridge, session handler, tools, mic/player, assistant controller | conversation | in progress |
-| 4 | Gemini vision extraction, snapshot answers, dates, optional YOLO | vision | in progress |
-| 5 | Mobile UI, accessibility, announcements, error recovery | interface | in progress |
-| 6 | Integration of 2–5 | lead | todo |
-| 7 | Integration/e2e tests, docs, checklist, submission | verification | todo |
+| 2 | Camera controller, sampler, frame quality, S25 connection doc | camera | done (verified: 44 unit tests with injected media fakes; not yet on a physical S25) |
+| 3 | Live bridge, session handler, tools, mic/player, assistant controller | conversation | done (verified: 101 unit tests with FIXTURE Live connector/vision; not yet against real Gemini Live) |
+| 4 | Gemini vision extraction, snapshot answers, dates, optional YOLO | vision | done (verified: 98 unit tests with FIXTURE `ai`; YOLO26n service ran on this Mac on a sample image, 25–30 ms inference; Gemini extraction not yet live-tested) |
+| 5 | Mobile UI, accessibility, announcements, error recovery | interface | done (verified: 69 jsdom/RTL tests with FIXTURE controller; not yet rendered in a real browser or TalkBack) |
+| 6 | Integration of 2–5 | lead | done (verified: 4 branches merged without conflicts; main.tsx wired; 322 tests, typecheck, lint, production build, secret scan; real-server WS smoke test: hello → ready + honest missing_credentials) |
+| 7 | Integration/e2e tests, mobile checklist, test results | verification | in progress |
+| 7b | README, submission, demo script, ai.md, attribution | lead | in progress |
 | 8 | Live provider verification | lead | blocked (no GEMINI_API_KEY configured in this environment) |
 | 9 | Physical S25 verification | user + lead | blocked (requires the device; `adb` not installed on this computer) |
+
+## Contract changes after scaffold
+
+- `hello.clientTime` (lead, before workers started): clock-skew estimate for frame-age checks.
+- `ready.timeZone` / `ServerInfo.timeZone` (requested by interface worker): UI names the comparison timezone instead of hard-coding it.
+- `startServer(config, overrides)` (lead): test-only injection of FIXTURE providers for browser e2e tests.
+
+## Integration notes
+
+- Vite dev middleware blocks non-localhost Host headers; the server relaxes this only when `ACCESS_TOKEN` is set (camera worker finding).
+- The mic AudioWorklet is emitted as a separate same-origin file (`?url&no-inline`) so the production CSP (`script-src 'self'`) allows it (conversation worker finding).
+- Secret scan rule narrowed: UI help text may name `GEMINI_API_KEY`; env access or `VITE_`-prefixed secrets in the bundle still fail (verified with a planted leak file).

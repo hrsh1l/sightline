@@ -16,8 +16,9 @@ if (!key && existsSync('.env')) {
 }
 const patterns = [
   { name: 'Google API key pattern', re: /AIza[0-9A-Za-z_-]{20,}/ },
-  { name: 'GEMINI_API_KEY identifier', re: /GEMINI_API_KEY/ },
-  { name: 'ACCESS_TOKEN identifier', re: /ACCESS_TOKEN/ },
+  // Help text may name the variable; reading it from an env object in client code must never happen.
+  { name: 'env access to a server secret', re: /(import\.meta\.env|process\.env)\s*(\.|\[\s*['"`])\s*(VITE_[A-Z_]*)?(GEMINI_API_KEY|ACCESS_TOKEN|GOOGLE_API_KEY)/ },
+  { name: 'VITE_-prefixed secret name', re: /VITE_[A-Z_]*(GEMINI|API_KEY|ACCESS_TOKEN)/ },
   { name: 'direct provider endpoint', re: /generativelanguage\.googleapis\.com/ },
 ];
 const files = [];

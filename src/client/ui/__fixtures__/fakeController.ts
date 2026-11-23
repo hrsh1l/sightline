@@ -40,7 +40,7 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       speakSnapshotAnswers: true,
       showDiagnostics: false,
     },
-    server: { configured: true, liveModel: 'fixture-live', visionModel: 'fixture-vision', detector: false, sessionId: null },
+    server: { configured: true, liveModel: 'fixture-live', visionModel: 'fixture-vision', detector: false, sessionId: null, timeZone: 'Europe/London' },
     metrics: {
       frameAgeAtQuestionMs: null,
       questionToFirstTextMs: null,
@@ -61,7 +61,7 @@ export function liveState(overrides: Partial<AssistantState> = {}): AssistantSta
     camera: { ...base.camera, status: 'active', facing: 'environment', videoWidth: 1280, videoHeight: 720, canSwitch: true },
     mic: { ...base.mic, status: 'active', echoCancellation: true },
     player: { ...base.player, contextState: 'running' },
-    server: { ...(base.server ?? { configured: true, liveModel: null, visionModel: null, detector: false }), sessionId: 'fixture-session' },
+    server: { ...(base.server ?? { configured: true, liveModel: null, visionModel: null, detector: false, timeZone: 'Europe/London' }), sessionId: 'fixture-session' },
     ...overrides,
   });
 }
