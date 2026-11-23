@@ -127,12 +127,38 @@ TalkBack, no Android permission UI, no backgrounding or screen lock.
 
 ## 4. Live provider tests
 
-**Not run: no GEMINI_API_KEY in this environment.** Run `npm run check:models` then the manual checklist
-([mobile-checklist.md](mobile-checklist.md)).
+The original pass (above) had no key. The repository owner later added `GEMINI_API_KEY` locally; these are
+real calls from the development Mac (2026-11-23, evening, London). Text-only prompts; no user media.
+
+`npm run check:models`:
+
+| Check | Result |
+|---|---|
+| `gemini-3.6-flash` models.get + generateContent | ok (with a 20-token cap the reply was empty: thinking tokens count against `maxOutputTokens`; cap raised to 512) |
+| `gemini-3.5-flash-lite` models.get + generateContent | ok |
+| `gemini-3.8-live` Live session | ok: setup 299 ms, first audio 664 ms after connect, output transcription received |
+
+Latency probe ("Reply with the single word OK", `maxOutputTokens` 1024, 20 s client timeout):
+
+| Model | default thinking | MINIMAL | LOW |
+|---|---|---|---|
+| gemini-3.6-flash | 1249 ms, 1886 ms (79–82 thought tokens) | 576 ms; later 504 "Deadline expired" | 504 "Deadline expired" |
+| gemini-3.5-flash-lite | 476 ms | 523 ms | 414 ms |
+| gemini-3.8-flash | 503 "high demand" | 400 (MINIMAL not supported) | 503 "high demand" |
+
+An earlier single `check:models` run measured 33.4 s for `gemini-3.6-flash` and 3.7 s for flash-lite. Conclusion:
+provider latency for the Flash vision model was highly variable that evening; the label pipeline therefore uses
+flash-lite for fast steps and falls back to it on 503/504/timeouts (see implementation status).
+
+Not yet measured: image-bearing label extraction latency/accuracy, Live question-to-first-audio on the phone.
 
 ## 5. Physical S25 tests
 
-**Not run: no device connected.** Use [mobile-checklist.md](mobile-checklist.md).
+Informal: the repository owner ran the app on a Samsung Galaxy S25 (SM-S931B) over Wireless debugging +
+`adb reverse` and reported the conversation demo "working good", with two issues: (1) the assistant once replied
+in Spanish → fixed by pinning the reply language in the instructions (commit e2e2567); (2) small labels could not
+be read → addressed by the detail-reading work in progress. The formal checklist
+([mobile-checklist.md](mobile-checklist.md)) has not been completed yet; no measurements recorded.
 
 ## Product bugs found and fixed in this pass
 
