@@ -21,3 +21,6 @@ recordings/
 *.wav
 # archives
 sightline-source*.zip
+
+# Claude Code local state and agent worktrees
+.claude/
