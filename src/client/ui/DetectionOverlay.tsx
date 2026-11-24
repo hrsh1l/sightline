@@ -1,6 +1,7 @@
-import type { Detection, ServerDetections } from '../../shared/protocol.js';
+import type { Detection, NormalizedBox, ServerDetections } from '../../shared/protocol.js';
 import type { FindStatus } from '../contracts.js';
-import { DETECTION_SOURCE_TEXT, findSummaryText, isFindRunning } from './labels.js';
+import { candidatePositionText, findSummaryText, isFindRunning } from './findText.js';
+import { DETECTION_SOURCE_TEXT } from './labels.js';
 import { mapBoxToElement, type Size } from './overlayGeometry.js';
 
 const pct = (score: number) => `${Math.round(score * 100)}%`;
@@ -10,17 +11,42 @@ const CHIP_ABOVE_MIN_Y = 32;
 
 export type OverlaySource = 'yolo' | 'gemini';
 
+/** One box to draw. `kind` picks the style; `chip` is the visible label text. */
+export interface OverlayItem {
+  kind: 'detection' | 'target' | 'candidate';
+  box: NormalizedBox;
+  chip: string;
+}
+
+const sameBox = (a: NormalizedBox, b: NormalizedBox) =>
+  Math.abs(a.x - b.x) < 0.01 && Math.abs(a.y - b.y) < 0.01 && Math.abs(a.w - b.w) < 0.01 && Math.abs(a.h - b.h) < 0.01;
+
+const detectionItem = (d: Detection): OverlayItem => ({
+  kind: d.target === true ? 'target' : 'detection',
+  box: d.box,
+  chip: `${d.label} ${pct(d.score)}`,
+});
+
+const RANK: Record<OverlayItem['kind'], number> = { detection: 0, candidate: 1, target: 2 };
+
 /**
- * Boxes to draw: the latest detections, plus the find target from find mode when the detections do not
- * already carry one (e.g. the detector is off but Gemini find is running). The target is drawn last (on top).
+ * Boxes to draw: the latest detections; the find target from find mode when the detections do not already carry
+ * one (e.g. the detector is off but Gemini find is running); and, while the user must choose, each candidate
+ * labelled "Left" / "Middle" / "Right" (replacing the matching plain detection box). Order: plain detections,
+ * candidates, then the target on top.
  */
-export function overlayItems(detections: ServerDetections | null, find: FindStatus | null): Detection[] {
-  const items: Detection[] = detections ? [...detections.detections] : [];
-  const hasTarget = items.some((d) => d.target === true);
+export function overlayItems(detections: ServerDetections | null, find: FindStatus | null): OverlayItem[] {
+  const dets = detections ? detections.detections : [];
+  const candidates = isFindRunning(find) && find.state === 'needs_selection' ? (find.candidates ?? []) : [];
+  const items: OverlayItem[] = dets
+    .filter((d) => d.target === true || !candidates.some((c) => sameBox(c.box, d.box)))
+    .map(detectionItem);
+  for (const c of candidates) items.push({ kind: 'candidate', box: c.box, chip: candidatePositionText(c) });
+  const hasTarget = items.some((d) => d.kind === 'target');
   if (!hasTarget && isFindRunning(find) && find.target && (find.state === 'tracking' || find.state === 'centered')) {
-    items.push({ label: find.target.label, score: find.target.score, box: find.target.box, target: true });
+    items.push({ kind: 'target', box: find.target.box, chip: `${find.target.label} ${pct(find.target.score)}` });
   }
-  return items.sort((a, b) => Number(a.target === true) - Number(b.target === true));
+  return items.sort((a, b) => RANK[a.kind] - RANK[b.kind]);
 }
 
 export function overlaySource(detections: ServerDetections | null, find: FindStatus | null): OverlaySource {
@@ -28,9 +54,22 @@ export function overlaySource(detections: ServerDetections | null, find: FindSta
   return find?.source ?? 'yolo';
 }
 
+const BOX_CLASS: Record<OverlayItem['kind'], string> = {
+  detection: 'detections__box',
+  target: 'detections__box detections__box--target',
+  candidate: 'detections__box detections__box--candidate',
+};
+
+const BOX_TESTID: Record<OverlayItem['kind'], string> = {
+  detection: 'detection-box',
+  target: 'detection-box-target',
+  candidate: 'detection-box-candidate',
+};
+
 /**
  * Green boxes over the preview, positioned in element CSS pixels (object-fit: contain mapping).
- * Decorative (aria-hidden): DetectionSummary carries the same information as text.
+ * Decorative (aria-hidden): DetectionSummary and the Find panel carry the same information as text, and no
+ * action needs the preview.
  */
 export function DetectionOverlay({
   items,
@@ -38,7 +77,7 @@ export function DetectionOverlay({
   sourceSize,
   element,
 }: {
-  items: Detection[];
+  items: OverlayItem[];
   source: OverlaySource;
   sourceSize: Size;
   element: Size;
@@ -49,26 +88,27 @@ export function DetectionOverlay({
       {items.map((d, i) => {
         const r = mapBoxToElement(d.box, sourceSize, element, 'contain');
         if (!r) return null;
-        const target = d.target === true;
+        const emphasised = d.kind !== 'detection';
         const above = r.y >= CHIP_ABOVE_MIN_Y;
         return (
-          <div key={`${d.label}-${i}`} className="detections__item">
+          <div key={`${d.kind}-${d.chip}-${i}`} className="detections__item">
             <div
-              className={target ? 'detections__box detections__box--target' : 'detections__box'}
-              data-testid={target ? 'detection-box-target' : 'detection-box'}
+              className={BOX_CLASS[d.kind]}
+              data-testid={BOX_TESTID[d.kind]}
               style={{ left: r.x, top: r.y, width: r.width, height: r.height }}
             />
             <span
               className={[
                 'detections__chip',
                 above ? 'detections__chip--above' : 'detections__chip--inside',
-                target ? 'detections__chip--target' : '',
+                d.kind === 'target' ? 'detections__chip--target' : '',
+                d.kind === 'candidate' ? 'detections__chip--candidate' : '',
               ]
                 .filter(Boolean)
                 .join(' ')}
-              style={{ left: r.x, top: above ? r.y : r.y + (target ? 5 : 3), maxWidth: Math.max(element.width - r.x, 48) }}
+              style={{ left: r.x, top: above ? r.y : r.y + (emphasised ? 5 : 3), maxWidth: Math.max(element.width - r.x, 48) }}
             >
-              {d.label} {pct(d.score)}
+              {d.chip}
             </span>
           </div>
         );

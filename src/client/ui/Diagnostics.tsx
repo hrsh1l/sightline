@@ -1,7 +1,7 @@
 import type { AssistantState } from '../contracts.js';
 
 const DASH = '—';
-const ms = (v: number | null) => (v === null || !Number.isFinite(v) ? DASH : `${Math.round(v)} ms`);
+const ms = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? DASH : `${Math.round(v)} ms`);
 const txt = (v: string | null | undefined) => (v ? v : DASH);
 
 /** Developer diagnostics. Plain definition list; values are text so they can be read and copied. */
@@ -16,6 +16,21 @@ function findText(state: AssistantState): string {
   const f = state.find;
   if (!f) return DASH;
   return `${f.state} “${f.query}” (${f.source})`;
+}
+
+const rate = (v: number | null | undefined) => (v === null || v === undefined || !Number.isFinite(v) ? DASH : `${v.toFixed(1)} /s`);
+
+function observationAge(state: AssistantState, now: number): string {
+  const at = state.find?.observedAt;
+  if (at === null || at === undefined) return DASH;
+  return ms(Math.max(0, now - at));
+}
+
+function calibrationText(state: AssistantState): string {
+  const c = state.calibration;
+  if (!c) return DASH;
+  const heard = c.heardSeparation === null ? 'not answered' : c.heardSeparation ? 'heard stereo' : 'no stereo';
+  return `${c.step} · ${heard} · mic ${c.micActive ? 'on' : 'off'}`;
 }
 
 export function Diagnostics({ state, now = Date.now() }: { state: AssistantState; now?: number }) {
@@ -41,7 +56,13 @@ export function Diagnostics({ state, now = Date.now() }: { state: AssistantState
     ['Camera still capture', state.camera.stillCapture ? 'Yes' : 'No'],
     ['Torch', state.camera.torch.supported ? (state.camera.torch.on ? 'Supported, on' : 'Supported, off') : 'Not supported'],
     ['Detections', detectionsText(state, now)],
-    ['Find', findText(state)],
+    ['Detection age', ms(m.detectionAgeMs)],
+    ['Detection rate', rate(m.detectionRate)],
+    ['Find state', findText(state)],
+    ['Find track id', state.find?.trackId === null || state.find?.trackId === undefined ? DASH : String(state.find.trackId)],
+    ['Find observation age', observationAge(state, now)],
+    ['Guidance', `${state.settings.guidanceMode} · mic ${state.settings.findMicPolicy} · volume ${Math.round(state.settings.cueVolume * 100)}%`],
+    ['Stereo check', calibrationText(state)],
     ['Audio output', state.player.contextState],
   ];
   return (

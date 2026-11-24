@@ -2,9 +2,8 @@
 import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it } from 'vitest';
 import { App } from './App.js';
-import type { FindState } from '../shared/protocol.js';
 import type { AppError, AssistantState, ConnectionStatus } from './contracts.js';
-import { FakeController, liveState, makeDetections, makeEvidence, makeFind, makeState } from './ui/__fixtures__/fakeController.js';
+import { FakeController, liveState, makeCandidates, makeDetections, makeEvidence, makeFind, makeState } from './ui/__fixtures__/fakeController.js';
 
 afterEach(cleanup);
 
@@ -185,80 +184,30 @@ describe('Torch', () => {
   });
 });
 
-describe('Find', () => {
-  const findInput = () => screen.getByLabelText('What should I find?') as HTMLInputElement;
-
-  it('submits the trimmed query, clears the field and ignores empty input', () => {
+describe('Find an object (in the session screen)', () => {
+  // Detailed Find panel behaviour is in src/client/ui/FindPanel.test.tsx.
+  it('is a labelled region with the supported-object buttons, and no free-text field', () => {
     const { controller } = setup(liveState());
-    fireEvent.click(button('Find'));
-    fireEvent.change(findInput(), { target: { value: '   ' } });
-    fireEvent.submit(findInput().closest('form')!);
-    expect(controller.find).not.toHaveBeenCalled();
-    fireEvent.change(findInput(), { target: { value: '  the red tin  ' } });
-    fireEvent.click(button('Find'));
-    expect(controller.find).toHaveBeenCalledTimes(1);
-    expect(controller.find).toHaveBeenCalledWith('the red tin');
-    expect(findInput().value).toBe('');
+    const region = screen.getByRole('region', { name: 'Find an object' });
+    expect(within(region).queryByRole('textbox')).toBeNull();
+    expect(screen.queryByLabelText('What should I find?', { selector: 'input' })).toBeNull();
+    fireEvent.click(within(region).getByRole('button', { name: 'Bottle' }));
+    expect(controller.find).toHaveBeenCalledWith('bottle');
   });
 
-  it('explains the aiming beeps in image-relative terms and limits the query length', () => {
-    setup(liveState());
-    const input = findInput();
-    const help = document.getElementById(input.getAttribute('aria-describedby') ?? '')?.textContent ?? '';
-    expect(help).toContain('left/right in your ears = left/right in the picture');
-    expect(help).toContain('higher pitch = higher in the picture');
-    expect(help).toContain('faster = closer to the centre');
-    expect(help).toContain('Headphones work best.');
-    expect(input.maxLength).toBe(80);
-  });
-
-  it('is disabled until connected', () => {
+  it('find buttons are disabled until connected', () => {
     const { controller } = setup(liveState({ connection: 'connecting' }));
-    expect((button('Find') as HTMLButtonElement).disabled).toBe(true);
-    fireEvent.change(findInput(), { target: { value: 'salt' } });
-    fireEvent.submit(findInput().closest('form')!);
+    const btn = within(screen.getByRole('region', { name: 'Find an object' })).getByRole('button', { name: 'Bottle' }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
     expect(controller.find).not.toHaveBeenCalled();
   });
 
-  it('Stop finding calls stopFind', () => {
-    const { controller } = setup(liveState({ find: makeFind({ state: 'searching' }) }));
-    fireEvent.click(button('Stop finding'));
-    expect(controller.stopFind).toHaveBeenCalledTimes(1);
-  });
-
-  const expected: Record<FindState, { text: string; stop: boolean }> = {
-    searching: { text: 'Searching for “salt”…', stop: true },
-    tracking: { text: '“salt” is left of the picture, near the top', stop: true },
-    centered: { text: '“salt” centred in the picture', stop: true },
-    lost: { text: 'Lost “salt” — move the camera slowly', stop: true },
-    not_found: { text: 'Not found: “salt” — try moving the camera slowly or a different name', stop: true },
-    stopped: { text: 'Stopped finding “salt”', stop: false },
-    timeout: { text: 'Stopped finding “salt” after 90 seconds', stop: false },
-  };
-
-  it.each(Object.keys(expected) as FindState[])('state %s is shown in words with a shape, never distances', (state) => {
-    setup(liveState({ find: makeFind({ state }) }));
-    const status = screen.getByTestId('find-status');
-    expect(status.textContent).toBe(expected[state].text + (expected[state].stop ? 'Stop finding' : ''));
-    expect(status.querySelector(`svg[aria-hidden="true"][data-state="${state}"]`)).not.toBeNull();
-    expect(status.getAttribute('aria-live')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Stop finding' }) !== null).toBe(expected[state].stop);
-    expect(status.textContent).not.toMatch(/\b(metres?|meters?|feet|steps?|walk|ahead|behind)\b/i);
-  });
-
-  it('tracking falls back to a position computed from the box when there is no description', () => {
-    setup(
-      liveState({
-        find: makeFind({ state: 'tracking', description: null, target: { label: 'salt', score: 0.9, box: { x: 0.7, y: 0.7, w: 0.2, h: 0.2 } } }),
-      }),
-    );
-    expect(screen.getByTestId('find-status').textContent).toContain('“salt” is right of the picture, near the bottom');
-  });
-
-  it('has no find status when find is null', () => {
-    setup(liveState());
-    expect(screen.queryByTestId('find-status')).toBeNull();
-    expect(screen.queryByRole('button', { name: 'Stop finding' })).toBeNull();
+  it('the Find status line is not a live region (the announcer stays the only one)', () => {
+    setup(liveState({ find: makeFind({ state: 'needs_selection', candidates: makeCandidates(), query: 'cup' }) }));
+    const live = Array.from(document.querySelectorAll('[aria-live]')).map((el) => el.getAttribute('data-testid'));
+    expect(live.sort()).toEqual(['announcer-assertive', 'announcer-polite']);
+    expect(document.querySelectorAll('[role="alert"], [role="status"], [role="log"], output')).toHaveLength(0);
   });
 });
 
@@ -530,19 +479,21 @@ describe('Camera preview and detections', () => {
           source: 'gemini',
           detections: [...base.detections, { label: 'salt', score: 0.9, box: { x: 0.4, y: 0.4, w: 0.2, h: 0.2 }, target: true }],
         }),
-        find: makeFind({ state: 'centered' }),
+        find: makeFind({ state: 'centered', query: 'salt', target: null, source: 'gemini' }),
       }),
     );
     expect(screen.getByTestId('detection-summary').textContent).toBe(
-      'Finding salt: centred in the picture. Detector sees: bottle (82%), cup (61%) — image positions only',
+      'Finding salt: centred in the camera. Detector sees: bottle (82%), cup (61%) — image positions only',
     );
   });
 
   it('summary describes find progress even with no detections', () => {
     const { controller } = setup(liveState({ find: makeFind({ state: 'searching' }) }));
-    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding salt: searching');
+    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding bottle: searching');
     act(() => controller.setState({ find: makeFind({ state: 'tracking' }) }));
-    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding salt: left of the picture, near the top');
+    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding bottle: left of the picture');
+    act(() => controller.setState({ find: makeFind({ state: 'needs_selection', query: 'cup', candidates: makeCandidates(['left', 'right']) }) }));
+    expect(screen.getByTestId('detection-summary').textContent).toBe('Finding cup: choose one of 2 (left, right)');
     act(() => controller.setState({ find: makeFind({ state: 'stopped' }) }));
     expect(screen.queryByTestId('detection-summary')).toBeNull();
   });
@@ -592,15 +543,15 @@ describe('Settings and diagnostics', () => {
     const group = screen.getByRole('group', { name: 'Sound and vibration' });
     const cases: Array<[string, Record<string, boolean>]> = [
       ['Event sounds', { earcons: false }],
-      ['Aiming beeps in Find', { spatialAudio: false }],
+      ['Stereo beacon in Find', { spatialAudio: false }],
       ['Vibration', { haptics: false }],
-      ['I’m using headphones (3D sound)', { headphones: true }],
     ];
     for (const [label, patch] of cases) {
       fireEvent.click(within(group).getByLabelText(label));
       expect(controller.updateSettings).toHaveBeenLastCalledWith(patch);
     }
-    expect(controller.updateSettings).toHaveBeenCalledTimes(4);
+    expect(controller.updateSettings).toHaveBeenCalledTimes(3);
+    expect(screen.queryByLabelText(/headphones/i)).toBeNull();
   });
 
   it('diagnostics show still capture, torch, detections and find state', () => {
@@ -609,13 +560,28 @@ describe('Settings and diagnostics', () => {
       ...s,
       settings: { ...s.settings, showDiagnostics: true },
       detections: makeDetections({ source: 'gemini' }),
-      find: makeFind({ state: 'centered' }),
+      find: makeFind({ state: 'centered', trackId: 7, observedAt: Date.now() - 150 }),
+      metrics: { ...s.metrics, detectionAgeMs: 84.6, detectionRate: 4.84 },
+      calibration: { step: 'done', heardSeparation: false, micActive: true },
     });
     const text = screen.getByTestId('diagnostics').textContent ?? '';
     expect(text).toContain('Camera still captureYes');
     expect(text).toContain('TorchSupported, off');
     expect(text).toMatch(/Detectionsgemini · 2 · \d+ ms old/);
-    expect(text).toContain('Findcentered “salt” (gemini)');
+    expect(text).toContain('Detection age85 ms');
+    expect(text).toContain('Detection rate4.8 /s');
+    expect(text).toContain('Find statecentered “bottle” (yolo)');
+    expect(text).toContain('Find track id7');
+    expect(text).toMatch(/Find observation age1\d\d ms/);
+    expect(text).toContain('Guidancestereo · mic keep · volume 70%');
+    expect(text).toContain('Stereo checkdone · no stereo · mic on');
+  });
+
+  it('diagnostics show dashes for find and detection timing when there is none', () => {
+    const s = liveState();
+    setup({ ...s, settings: { ...s.settings, showDiagnostics: true } });
+    const text = screen.getByTestId('diagnostics').textContent ?? '';
+    for (const k of ['Detection age', 'Detection rate', 'Find state', 'Find track id', 'Find observation age']) expect(text).toContain(`${k}—`);
   });
 
   it('shows diagnostics with units and dashes for missing values', () => {
