@@ -5,6 +5,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type {
+  AssistantSettings,
   AudioPlayer,
   CameraController,
   CameraState,
@@ -21,7 +22,19 @@ import type {
 } from '../contracts.js';
 import { LIMITS, type ClientMessage, type ServerDetections, type ServerMessage, type ServerMessageOf } from '../../shared/protocol.js';
 import { encodePcm16Base64 } from '../audio/pcm.js';
-import { createAssistantController, type AssistantDeps } from './AssistantController.js';
+import {
+  CALIBRATION_FALLBACK_TEXT,
+  CAMERA_STOPPED_FIND_TEXT,
+  CENTRED_SPEECH_DELAY_MS,
+  GUIDANCE_TTS_TAIL_MS,
+  GUIDANCE_WAIT_FOR_ASSISTANT_MS,
+  REAR_CAMERA_PROMPT,
+  SPOKEN_DIRECTION_INTERVAL_MS,
+  USER_SPEECH_SUPPRESS_MS,
+  createAssistantController,
+  directionWord,
+  type AssistantDeps,
+} from './AssistantController.js';
 import type { SessionSocketLike } from './SessionSocket.js';
 
 const calls: string[] = [];
@@ -163,6 +176,7 @@ function fakePlayer() {
       return () => audibleLs.delete(cb);
     },
     close: vi.fn(async () => undefined),
+    context: null,
     setState: s.set,
     audible: (t: number, at: number) => {
       for (const l of audibleLs) l(t, at);
@@ -171,8 +185,27 @@ function fakePlayer() {
   return player satisfies AudioPlayer;
 }
 
+/** FIXTURE: browser TTS fake with speaking-change events; finish() simulates the utterance ending. */
 function fakeSpeech() {
-  return { supported: true, speaking: false, speak: vi.fn(), cancel: vi.fn() } satisfies SpeechOutput;
+  const ls = new Set<(s: boolean) => void>();
+  const emit = (v: boolean) => {
+    if (sp.speaking === v) return;
+    sp.speaking = v;
+    for (const l of [...ls]) l(v);
+  };
+  const sp = {
+    supported: true,
+    speaking: false,
+    speak: vi.fn((_t: string) => emit(true)),
+    cancel: vi.fn(() => emit(false)),
+    onSpeakingChange: (cb: (s: boolean) => void) => {
+      ls.add(cb);
+      return () => ls.delete(cb);
+    },
+    finish: () => emit(false),
+    spoken: () => sp.speak.mock.calls.map((c) => c[0]),
+  };
+  return sp satisfies SpeechOutput;
 }
 
 function fakeSocket() {
@@ -721,7 +754,17 @@ function fakeSpatial() {
     stopTracking: vi.fn(),
     earcon: vi.fn((_k: Earcon) => undefined),
     setDucked: vi.fn((_d: boolean) => undefined),
-    configure: vi.fn((_o: { earcons: boolean; spatial: boolean; haptics: boolean; headphones: boolean }) => undefined),
+    setSuppressed: vi.fn((s: boolean) => {
+      sp.suppressed = s;
+    }),
+    suppressed: false,
+    calibrationTone: vi.fn((ch: 'left' | 'right' | 'centre') => {
+      calls.push(`tone.${ch}`);
+      return Promise.resolve();
+    }),
+    cancelCalibrationTone: vi.fn(),
+    audibleUntil: Number.NEGATIVE_INFINITY,
+    configure: vi.fn((_o: { earcons: boolean; beacon: boolean; haptics: boolean; volume: number }) => undefined),
     close: vi.fn(async () => undefined),
     earcons: () => sp.earcon.mock.calls.map((c) => c[0]),
   };
@@ -771,12 +814,25 @@ describe('spatial cues and settings', () => {
     expect(spatial.stopTracking).toHaveBeenCalled();
   });
 
-  it('defaults earcons/spatial/haptics on and headphones off, and reconfigures on change', async () => {
+  it('v3 defaults (cueVolume 0.5, stereo, keep) and configure({ earcons, beacon, haptics, volume })', async () => {
     const h = await startedV2();
-    expect(h.controller.getState().settings).toMatchObject({ earcons: true, spatialAudio: true, haptics: true, headphones: false });
-    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, spatial: true, haptics: true, headphones: false });
-    h.controller.updateSettings({ headphones: true, haptics: false });
-    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, spatial: true, haptics: false, headphones: true });
+    const s = h.controller.getState().settings;
+    expect(s).toMatchObject({ earcons: true, spatialAudio: true, haptics: true, cueVolume: 0.5, guidanceMode: 'stereo', findMicPolicy: 'keep' });
+    expect('headphones' in s).toBe(false);
+    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, beacon: true, haptics: true, volume: 0.5 });
+    h.controller.updateSettings({ cueVolume: 0.8, haptics: false });
+    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, beacon: true, haptics: false, volume: 0.8 });
+    h.controller.updateSettings({ guidanceMode: 'spoken' });
+    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, beacon: false, haptics: false, volume: 0.8 });
+    h.controller.updateSettings({ guidanceMode: 'stereo', spatialAudio: false });
+    expect(h.spatial.configure).toHaveBeenLastCalledWith({ earcons: true, beacon: false, haptics: false, volume: 0.8 });
+    h.controller.updateSettings({ cueVolume: 7 });
+    expect(h.controller.getState().settings.cueVolume).toBe(1);
+  });
+
+  it('drops a persisted v2 headphones setting', () => {
+    const h = setup({ initialSettings: { headphones: true } as unknown as Partial<AssistantSettings> });
+    expect('headphones' in h.controller.getState().settings).toBe(false);
   });
 
   it('turns detections on after ready when the server has a detector, unless the user chose', async () => {
@@ -878,29 +934,37 @@ describe('find mode', () => {
 
     h.socket.receive(findMsg({ requestId }));
     h.socket.receive(
-      findMsg({ requestId, state: 'tracking', target: { label: 'cup', score: 0.8, box: boxAt(0.2, 0.3) }, frameId: 4, description: 'left of the picture, near the top, small' }),
+      findMsg({
+        requestId,
+        state: 'tracking',
+        target: { label: 'cup', score: 0.8, box: boxAt(0.2, 0.3) },
+        frameId: 4,
+        description: 'left of the picture, near the top, small',
+        trackId: 3,
+        observedAt: Date.now(),
+      }),
     );
     st = h.controller.getState();
     expect(st.busy).toBeNull();
-    expect(st.find).toMatchObject({ state: 'tracking', description: 'left of the picture, near the top, small' });
-    expect(h.spatial.setTarget).toHaveBeenLastCalledWith({ cx: 0.2, cy: 0.3, area: expect.closeTo(0.01) as unknown as number, centered: false });
-    expect(st.announcement?.text).toBe('mug: left of the picture, near the top, small.');
+    expect(st.find).toMatchObject({ state: 'tracking', description: 'left of the picture, near the top, small', trackId: 3, observedAt: Date.now() });
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith({ cx: 0.2, cy: 0.3, area: expect.closeTo(0.01) as unknown as number, centered: false, observedAt: Date.now() });
 
-    h.socket.receive(findMsg({ requestId, state: 'centered', target: { label: 'cup', score: 0.8, box: boxAt(0.52, 0.5) }, frameId: 6, description: 'in the centre of the picture, small' }));
+    h.socket.receive(findMsg({ requestId, state: 'centered', target: { label: 'cup', score: 0.8, box: boxAt(0.52, 0.5) }, frameId: 6, trackId: 3, observedAt: Date.now() }));
     expect(h.spatial.setTarget).toHaveBeenLastCalledWith(expect.objectContaining({ centered: true }));
     expect(h.spatial.earcons().filter((k) => k === 'found')).toHaveLength(1);
-    expect(h.controller.getState().announcement?.text).toBe('mug centred.');
-    h.socket.receive(findMsg({ requestId, state: 'tracking', target: { label: 'cup', score: 0.8, box: boxAt(0.8, 0.5) }, frameId: 7, description: 'x' }));
-    h.socket.receive(findMsg({ requestId, state: 'centered', target: { label: 'cup', score: 0.8, box: boxAt(0.5, 0.5) }, frameId: 8, description: 'y' }));
-    expect(h.spatial.earcons().filter((k) => k === 'found')).toHaveLength(1); // first time only
+    h.socket.receive(findMsg({ requestId, state: 'centered', target: { label: 'cup', score: 0.8, box: boxAt(0.5, 0.5) }, frameId: 7, trackId: 3, observedAt: Date.now() }));
+    expect(h.spatial.earcons().filter((k) => k === 'found')).toHaveLength(1); // once while it stays centred
 
-    h.socket.receive(findMsg({ requestId, state: 'lost' }));
+    h.socket.receive(findMsg({ requestId, state: 'lost', trackId: 3 }));
     expect(h.spatial.setTarget).toHaveBeenLastCalledWith(null);
+    expect(h.spatial.earcons().at(-1)).toBe('lost');
     h.socket.receive(findMsg({ requestId, state: 'not_found' }));
     st = h.controller.getState();
-    expect(st.find).toBeNull();
+    expect(st.find).toMatchObject({ state: 'not_found' }); // inactive final status for the UI
     expect(h.spatial.stopTracking).toHaveBeenCalled();
     expect(st.announcement?.text).toBe('Could not find mug in the picture.');
+    h.controller.stopFind();
+    expect(h.controller.getState().find).toBeNull();
   });
 
   it('stopFind sends find.stop, clears state, and ignores late updates for that find', async () => {
@@ -1019,5 +1083,422 @@ describe('detail stills and torch', () => {
     h.camera.set({ torch: { supported: false, on: false } });
     await h.controller.setTorch(true);
     expect(h.controller.getState().announcement?.text).toBe('The torch is not available on this camera.');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v3: directional Find client audio (FIXTURE fakes: spatial engine, TTS, mic, socket)
+// ---------------------------------------------------------------------------
+
+async function finding(opts: { initialSettings?: AssistantDeps['initialSettings'] } = {}) {
+  const h = await startedV2({ detector: true, ...opts });
+  await h.controller.find('mug');
+  const sent = h.socket.sent.at(-1)!;
+  const requestId = sent.type === 'find' ? sent.requestId : '';
+  return { ...h, requestId };
+}
+
+type FindOver = Partial<ServerMessageOf<'find'>>;
+const seen = (requestId: string, cx: number, cy: number, over: FindOver = {}): ServerMessageOf<'find'> =>
+  findMsg({ requestId, state: 'tracking', target: { label: 'cup', score: 0.8, box: boxAt(cx, cy) }, frameId: 1, trackId: 1, observedAt: Date.now(), ...over });
+const prompt = (kind: NonNullable<ServerMessageOf<'find'>['prompt']>['kind'], text: string) => ({ prompt: { kind, text } });
+
+describe('find v3: beacon target', () => {
+  it('only a fresh observation of the selected target drives the beacon', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, { observedAt: Date.now() - LIMITS.findObservationMaxAgeMs - 1 }));
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith(null); // stale -> silence
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, { observedAt: null }));
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith(null); // no capture time -> never steer
+    h.socket.receive(seen(h.requestId, 0.2, 0.5));
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith(expect.objectContaining({ cx: 0.2, centered: false }));
+    h.socket.receive(findMsg({ requestId: h.requestId, state: 'searching' }));
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith(null);
+  });
+
+  it('needs_selection: candidates in state, selectTarget sends find.select, no beacon', async () => {
+    const h = await finding();
+    const candidates = [
+      { id: 1, label: 'cup', score: 0.9, box: boxAt(0.2, 0.5), position: 'left' as const },
+      { id: 2, label: 'cup', score: 0.8, box: boxAt(0.8, 0.5), position: 'right' as const },
+    ];
+    h.socket.receive(findMsg({ requestId: h.requestId, state: 'needs_selection', candidates }));
+    expect(h.controller.getState().find?.candidates).toEqual(candidates);
+    expect(h.controller.getState().busy).toBeNull();
+    expect(h.spatial.setTarget).toHaveBeenLastCalledWith(null);
+    expect(h.controller.getState().announcement?.text).toBe('2 matches: left cup, right cup. Choose one.');
+    h.controller.selectTarget(2);
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'find.select', candidateId: 2 });
+    h.controller.selectTarget(-1);
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'find.select', candidateId: 2 });
+  });
+
+  it('a different trackId clears the old target before the new one', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, { trackId: 1 }));
+    h.spatial.setTarget.mockClear();
+    h.socket.receive(seen(h.requestId, 0.8, 0.5, { trackId: 2 }));
+    expect(h.spatial.setTarget.mock.calls.map((c) => (c[0] ? c[0].cx : null))).toEqual([null, 0.8]);
+  });
+
+  it('beacon is suppressed while assistant audio plays', async () => {
+    const h = await finding();
+    h.socket.receive({ type: 'turn', turnId: 1, event: 'start', at: Date.now() });
+    h.socket.receive({ type: 'audio', turnId: 1, seq: 0, data: 'AAAA' });
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(true);
+    h.player.setState({ playing: false, turnId: null });
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe('find v3: spoken prompts', () => {
+  it('speaks a prompt once with local TTS and does not also announce it', async () => {
+    const h = await finding();
+    const tilt = prompt('tilt_up', 'Tilt the phone up slightly.');
+    h.socket.receive(seen(h.requestId, 0.5, 0.2, tilt));
+    h.socket.receive(seen(h.requestId, 0.5, 0.2, tilt)); // repeated in the next update
+    expect(h.speech.spoken()).toEqual(['Tilt the phone up slightly.']);
+    expect(h.controller.getState().find?.lastPrompt).toEqual(tilt.prompt);
+    expect(h.controller.getState().announcement?.text).not.toBe('Tilt the phone up slightly.');
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(true); // beacon silent under guidance speech
+    h.speech.finish();
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(false);
+  });
+
+  it('waits while Gemini audio plays, then speaks; gives up waiting after ~4 s', async () => {
+    const h = await finding();
+    h.socket.receive({ type: 'turn', turnId: 1, event: 'start', at: Date.now() });
+    h.socket.receive({ type: 'audio', turnId: 1, seq: 0, data: 'AAAA' });
+    h.socket.receive(findMsg({ requestId: h.requestId, state: 'searching', ...prompt('not_seen', "I don't see a mug yet.") }));
+    expect(h.speech.speak).not.toHaveBeenCalled();
+    h.player.setState({ playing: false, turnId: null });
+    expect(h.speech.spoken()).toEqual(["I don't see a mug yet."]);
+    h.speech.finish();
+    // Still playing after 4 s: speak anyway.
+    h.player.setState({ playing: true, turnId: 2 });
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+    vi.advanceTimersByTime(GUIDANCE_WAIT_FOR_ASSISTANT_MS - 100);
+    expect(h.speech.spoken()).toHaveLength(1);
+    vi.advanceTimersByTime(200);
+    expect(h.speech.spoken().at(-1)).toBe('Mug found.');
+  });
+
+  it('a newer prompt of the same kind replaces an unspoken older one; never cuts off speech', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+    expect(h.speech.spoken()).toEqual(['Mug found.']);
+    h.socket.receive(seen(h.requestId, 0.5, 0.2, prompt('tilt_up', 'Tilt the phone up slightly.')));
+    h.socket.receive(seen(h.requestId, 0.5, 0.8, prompt('tilt_down', 'Tilt the phone down slightly.')));
+    expect(h.speech.spoken()).toHaveLength(1); // first phrase still speaking
+    expect(h.speech.cancel).not.toHaveBeenCalled();
+    h.speech.finish();
+    expect(h.speech.spoken()).toEqual(['Mug found.', 'Tilt the phone down slightly.']);
+  });
+
+  it('drops a queued tilt prompt once the target is centred, then chimes and confirms', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+    h.socket.receive(seen(h.requestId, 0.5, 0.2, prompt('tilt_up', 'Tilt the phone up slightly.')));
+    h.socket.receive(seen(h.requestId, 0.5, 0.5, { state: 'centered', ...prompt('centred', 'Mug centred in the camera.') }));
+    expect(h.spatial.earcons().filter((k) => k === 'found')).toHaveLength(1);
+    h.speech.finish();
+    expect(h.speech.spoken()).toEqual(['Mug found.']); // confirmation waits a moment after the chime
+    vi.advanceTimersByTime(CENTRED_SPEECH_DELAY_MS);
+    expect(h.speech.spoken()).toEqual(['Mug found.', 'Mug centred in the camera.']);
+    const foundAt = h.spatial.earcon.mock.invocationCallOrder[h.spatial.earcons().lastIndexOf('found')]!;
+    expect(foundAt).toBeLessThan(h.speech.speak.mock.invocationCallOrder.at(-1)!);
+  });
+
+  it('final unsupported prompt is spoken and kept as an inactive status', async () => {
+    const h = await finding();
+    h.socket.receive(findMsg({ requestId: h.requestId, state: 'unsupported', ...prompt('unsupported', 'I can find cups or mugs, bottles, bowls, apples and bananas.') }));
+    expect(h.speech.spoken().at(-1)).toBe('I can find cups or mugs, bottles, bowls, apples and bananas.');
+    expect(h.controller.getState().find).toMatchObject({ state: 'unsupported', lastPrompt: { kind: 'unsupported' } });
+  });
+
+  it('ignores select_target / stop_finding tool events (no busy state)', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5));
+    h.socket.receive({ type: 'tool', callId: 'c', name: 'select_target', state: 'started' });
+    h.socket.receive({ type: 'tool', callId: 'd', name: 'stop_finding', state: 'started' });
+    expect(h.controller.getState().busy).toBeNull();
+  });
+});
+
+describe('find v3: spoken-direction mode', () => {
+  it('says Left/Right first, then Up/Down, throttled, silent when centred or stale, never over speech', async () => {
+    const h = await finding({ initialSettings: { guidanceMode: 'spoken' } });
+    expect(h.spatial.configure).toHaveBeenLastCalledWith(expect.objectContaining({ beacon: false }));
+    h.socket.receive(seen(h.requestId, 0.2, 0.2));
+    expect(h.speech.spoken()).toEqual(['Left']);
+    h.speech.finish();
+    h.socket.receive(seen(h.requestId, 0.2, 0.2));
+    expect(h.speech.spoken()).toHaveLength(1); // throttled
+    vi.advanceTimersByTime(SPOKEN_DIRECTION_INTERVAL_MS);
+    h.socket.receive(seen(h.requestId, 0.85, 0.5));
+    expect(h.speech.spoken().at(-1)).toBe('Right');
+    h.speech.finish();
+    vi.advanceTimersByTime(SPOKEN_DIRECTION_INTERVAL_MS);
+    h.socket.receive(seen(h.requestId, 0.5, 0.8, prompt('tilt_down', 'Tilt the phone down slightly.')));
+    expect(h.speech.spoken().at(-1)).toBe('Down'); // server tilt hint skipped in spoken mode
+    h.speech.finish();
+    vi.advanceTimersByTime(SPOKEN_DIRECTION_INTERVAL_MS);
+    h.socket.receive(seen(h.requestId, 0.5, 0.15, { observedAt: Date.now() - 5_000 }));
+    h.socket.receive(seen(h.requestId, 0.5, 0.5, { state: 'centered' }));
+    expect(h.speech.spoken().at(-1)).toBe('Down'); // stale / centred -> nothing new
+    // Not while the assistant talks.
+    h.player.setState({ playing: true, turnId: 1 });
+    h.socket.receive(seen(h.requestId, 0.1, 0.5));
+    expect(h.speech.spoken().at(-1)).toBe('Down');
+    expect(directionWord(0.5 + LIMITS.findCenterEnter.x / 2, 0.5)).toBeNull();
+    expect(directionWord(0.5, 0.5 - LIMITS.findCenterEnter.y - 0.01)).toBe('Up');
+  });
+});
+
+describe('find v3: rear camera and lifecycle', () => {
+  it('requires the rear camera', async () => {
+    const h = await startedV2({ detector: true });
+    h.camera.set({ facing: 'user' });
+    await h.controller.find('mug');
+    expect(h.socket.types()).not.toContain('find');
+    expect(h.controller.getState().find).toMatchObject({ state: 'error', lastPrompt: { kind: 'error', text: REAR_CAMERA_PROMPT } });
+    expect(h.speech.spoken()).toEqual([REAR_CAMERA_PROMPT]);
+    h.controller.stopFind();
+    expect(h.controller.getState().find).toBeNull();
+  });
+
+  it('switching to the front camera or a camera failure stops the find', async () => {
+    const h = await finding();
+    h.camera.set({ facing: 'user' });
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'find.stop' });
+    expect(h.controller.getState().find?.lastPrompt?.text).toBe(REAR_CAMERA_PROMPT);
+    h.camera.set({ facing: 'environment' });
+    await h.controller.find('mug');
+    h.spatial.stopTracking.mockClear();
+    h.camera.set({ status: 'disconnected' });
+    expect(h.spatial.stopTracking).toHaveBeenCalled();
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'find.stop' });
+    expect(h.controller.getState().announcement?.text).toBe(CAMERA_STOPPED_FIND_TEXT);
+  });
+
+  it('stopFind silences cues and guidance speech before sending find.stop', async () => {
+    const h = await finding();
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+    expect(h.speech.speaking).toBe(true);
+    h.spatial.stopTracking.mockClear();
+    h.controller.stopFind();
+    const stopAt = h.spatial.stopTracking.mock.invocationCallOrder[0]!;
+    const cancelAt = h.speech.cancel.mock.invocationCallOrder[0]!;
+    const sendAt = h.socket.send.mock.invocationCallOrder.at(-1)!;
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'find.stop' });
+    expect(stopAt).toBeLessThan(sendAt);
+    expect(cancelAt).toBeLessThan(sendAt);
+    expect(h.controller.getState().find).toBeNull();
+  });
+
+  it('does not cancel speech that is not guidance', async () => {
+    const h = await finding();
+    h.speech.speak('An answer.'); // e.g. a snapshot answer
+    h.controller.stopFind();
+    expect(h.speech.cancel).not.toHaveBeenCalled();
+  });
+
+  const lifecycle: [string, (h: Awaited<ReturnType<typeof finding>>) => void | Promise<void>][] = [
+    ['end()', (h) => h.controller.end()],
+    ['visibility hidden', () => setVisibility('hidden')],
+    ['socket disconnect', (h) => h.socket.serverClose()],
+    ['mode change', (h) => h.controller.setMode('snapshot')],
+    ['new find', async (h) => void (await h.controller.find('bottle'))],
+    ['assistant-started replacement', (h) => h.socket.receive(findMsg({ requestId: 'tool-find-9', query: 'bowl' }))],
+  ];
+  for (const [name, act] of lifecycle) {
+    it(`stops cues and guidance speech on ${name}`, async () => {
+      const h = await finding();
+      h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+      h.socket.receive(seen(h.requestId, 0.5, 0.2, prompt('tilt_up', 'Tilt the phone up slightly.'))); // queued
+      h.spatial.stopTracking.mockClear();
+      await act(h);
+      expect(h.spatial.stopTracking).toHaveBeenCalled();
+      expect(h.speech.cancel).toHaveBeenCalled();
+      h.speech.finish();
+      vi.advanceTimersByTime(10_000);
+      expect(h.speech.spoken()).not.toContain('Tilt the phone up slightly.');
+      // Late updates of the old find are ignored.
+      h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Old.')));
+      expect(h.speech.spoken()).not.toContain('Old.');
+    });
+  }
+
+  it('repeated find start/stop cycles keep no timers behind', async () => {
+    const h = await finding();
+    h.controller.stopFind();
+    const base = vi.getTimerCount();
+    for (let i = 0; i < 10; i++) {
+      await h.controller.find('mug');
+      const sent = h.socket.sent.at(-1)!;
+      const id = sent.type === 'find' ? sent.requestId : '';
+      h.socket.receive(seen(id, 0.2, 0.5, prompt('tracking', `Mug ${i}.`)));
+      h.controller.stopFind();
+    }
+    expect(vi.getTimerCount()).toBeLessThanOrEqual(base);
+  });
+});
+
+describe('find v3: microphone policy', () => {
+  it("'keep': blanks mic chunks during cue windows and guidance speech, keeps the stream continuous", async () => {
+    const h = await finding();
+    const zero = encodePcm16Base64(new Float32Array(1024));
+    h.setPerf(1_000);
+    h.spatial.audibleUntil = 1_050; // a pulse is audible until 1050 (perf clock)
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: zero });
+    h.setPerf(1_200); // outside the window
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: loud });
+    // User speech outside cue windows silences the beacon for a moment.
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(true);
+    vi.advanceTimersByTime(USER_SPEECH_SUPPRESS_MS + 10);
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(false);
+    // Guidance TTS speaking -> blanked.
+    h.socket.receive(seen(h.requestId, 0.2, 0.5, prompt('tracking', 'Mug found.')));
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: zero });
+    h.speech.finish();
+    h.mic.emit(loud); // within the TTS tail
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: zero });
+    h.setPerf(1_200 + GUIDANCE_TTS_TAIL_MS + 1);
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: loud });
+    // Not in find mode: never blanked.
+    h.controller.stopFind();
+    h.spatial.audibleUntil = 1e12;
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: loud });
+  });
+
+  it("'release': mic released during find, Talk reopens it while held, restored when find ends", async () => {
+    const h = await startedV2({ detector: true, initialSettings: { findMicPolicy: 'release' } });
+    expect(h.mic.getState().status).toBe('active');
+    await h.controller.find('mug');
+    expect(h.mic.stop).toHaveBeenCalledTimes(1);
+    expect(h.controller.getState().mic.status).toBe('stopped');
+    h.mic.emit(loud);
+    expect(h.socket.types()).not.toContain('audio');
+    h.mic.start.mockClear();
+    h.controller.setTalking(true);
+    expect(h.mic.start).toHaveBeenCalledTimes(1); // synchronously, inside the tap
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(true);
+    await vi.advanceTimersByTimeAsync(0);
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio', data: loud }); // not blanked: user speech
+    h.controller.setTalking(false);
+    expect(h.mic.stop).toHaveBeenCalledTimes(2);
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'audio.end' });
+    h.mic.start.mockClear();
+    h.controller.stopFind();
+    expect(h.mic.start).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.controller.getState().mic.status).toBe('active');
+    h.mic.emit(loud);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'audio' });
+  });
+
+  it("'release' + hidden: the normal mic is restored on resume()", async () => {
+    const h = await startedV2({ detector: true, initialSettings: { findMicPolicy: 'release' } });
+    await h.controller.find('mug');
+    h.mic.start.mockClear();
+    setVisibility('hidden');
+    expect(h.mic.start).not.toHaveBeenCalled();
+    setVisibility('visible');
+    await h.controller.resume();
+    expect(h.mic.start).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('stereo calibration', () => {
+  it('left, right, both: word then tone (word centred, tone panned), then confirm; beacon suppressed', async () => {
+    const h = await startedV2();
+    calls.length = 0;
+    const p = h.controller.startCalibration();
+    expect(calls.slice(0, 2)).toEqual(['player.unlock', 'spatial.unlock']);
+    expect(h.controller.getState().calibration).toEqual({ step: 'left', heardSeparation: null, micActive: true });
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(true);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.speech.spoken()).toEqual(['Left ear.']);
+    h.speech.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toContain('tone.left');
+    expect(h.controller.getState().calibration.step).toBe('right');
+    h.speech.finish();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.controller.getState().calibration.step).toBe('centre');
+    h.speech.finish();
+    await p;
+    expect(calls.filter((c) => c.startsWith('tone.'))).toEqual(['tone.left', 'tone.right', 'tone.centre']);
+    expect(h.speech.spoken()).toEqual(['Left ear.', 'Right ear.', 'Both ears.']);
+    expect(h.controller.getState().calibration.step).toBe('confirm');
+    h.controller.answerCalibration(true);
+    expect(h.controller.getState().calibration).toMatchObject({ step: 'done', heardSeparation: true });
+    expect(h.controller.getState().settings.guidanceMode).toBe('stereo');
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(false);
+  });
+
+  it('no separation heard -> spoken directions + polite announcement', async () => {
+    const h = await startedV2();
+    h.mic.stop();
+    const p = h.controller.startCalibration();
+    expect(h.controller.getState().calibration.micActive).toBe(false);
+    for (let i = 0; i < 3; i++) {
+      await vi.advanceTimersByTimeAsync(0);
+      h.speech.finish();
+    }
+    await p;
+    h.controller.answerCalibration(false);
+    const st = h.controller.getState();
+    expect(st.calibration).toMatchObject({ step: 'done', heardSeparation: false });
+    expect(st.settings.guidanceMode).toBe('spoken');
+    expect(h.spatial.configure).toHaveBeenLastCalledWith(expect.objectContaining({ beacon: false }));
+    expect(st.announcement).toMatchObject({ text: CALIBRATION_FALLBACK_TEXT, politeness: 'polite' });
+  });
+
+  it('cancelCalibration stops the tone and words immediately', async () => {
+    const h = await startedV2();
+    calls.length = 0;
+    void h.controller.startCalibration();
+    await vi.advanceTimersByTimeAsync(0);
+    h.controller.cancelCalibration();
+    expect(h.speech.cancel).toHaveBeenCalled();
+    expect(h.spatial.cancelCalibrationTone).toHaveBeenCalled();
+    expect(h.controller.getState().calibration.step).toBe('idle');
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(calls.filter((c) => c.startsWith('tone.'))).toEqual([]);
+    expect(h.spatial.setSuppressed).toHaveBeenLastCalledWith(false);
+  });
+});
+
+describe('detection metrics', () => {
+  it('detectionAgeMs = arrival - capture; detectionRate = distinct results per second over 5 s', async () => {
+    const h = await finding();
+    const det = (frameId: number, capturedAt: number): ServerDetections => ({
+      type: 'detections',
+      frameId,
+      capturedAt,
+      sourceWidth: 640,
+      sourceHeight: 480,
+      detectedAt: Date.now(),
+      model: 'd',
+      detections: [],
+      source: 'yolo',
+    });
+    h.socket.receive(det(10, Date.now() - 80));
+    expect(h.controller.getState().metrics.detectionAgeMs).toBe(80);
+    for (let i = 11; i < 36; i++) {
+      vi.advanceTimersByTime(200);
+      h.socket.receive(det(i, Date.now() - 50));
+      h.socket.receive(seen(h.requestId, 0.3, 0.5, { frameId: i, observedAt: Date.now() - 60 })); // same frame: not double-counted
+    }
+    const m = h.controller.getState().metrics;
+    expect(m.detectionAgeMs).toBe(60);
+    expect(m.detectionRate).toBeCloseTo(5, 0);
   });
 });
