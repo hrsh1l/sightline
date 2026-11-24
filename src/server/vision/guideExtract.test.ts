@@ -18,7 +18,7 @@ import { hasServingConstraints } from './servingSchema.js';
 
 // These tests pin the guide's primary model to the vision model (fallback = fast model); the default ordering
 // (fast model first, vision model as fallback) is covered by the 'default guide model order' test below.
-const config = { visionModel: 'gemini-3.6-flash', locateModel: 'gemini-3.5-flash-lite', guideModel: 'gemini-3.6-flash', timeZone: 'Europe/London', language: 'English' } as AppConfig;
+const config = { visionModel: 'gemini-3.6-flash', locateModel: 'gemini-3.5-flash-lite', guideModel: 'gemini-3.6-flash', guideFallbackModel: 'gemini-3.5-flash-lite', timeZone: 'Europe/London', language: 'English' } as AppConfig;
 const NOW = new Date('2026-11-24T12:00:00Z');
 const HIGH = PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH;
 const ULTRA = PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH;
@@ -520,7 +520,7 @@ describe('extractGuide', () => {
 
 describe('default guide model order (config.guideModel = fast model)', () => {
   it('tries the fast model first and falls back once to the vision model', async () => {
-    const fastFirst = { ...config, guideModel: 'gemini-3.5-flash-lite' } as AppConfig;
+    const fastFirst = { ...config, guideModel: 'gemini-3.5-flash-lite', guideFallbackModel: 'gemini-3.6-flash' } as AppConfig;
     const calls: string[] = [];
     const ai = {
       models: {
@@ -559,3 +559,24 @@ describe('cut-off evidence from text regions touching the photo edge (regression
     expect(applyEdgeEvidence(g, []).applied).toBe(false);
   });
 });
+
+describe('default guide retry (GUIDE_FALLBACK_MODEL unset = paused retry of the same fast model)', () => {
+  it('retries the same model once after a 503', async () => {
+    const sameModel = { ...config, guideModel: 'gemini-3.5-flash-lite', guideFallbackModel: 'gemini-3.5-flash-lite' } as AppConfig;
+    const calls: string[] = [];
+    const ai = {
+      models: {
+        generateContent: async (p: { model: string }) => {
+          calls.push(p.model);
+          if (calls.length === 1) throw Object.assign(new Error('overloaded'), { status: 503 });
+          return { text: JSON.stringify({ sections: [], warnings: [], title: null, readability: 'unreadable', issue: 'not_visible', issueEvidence: 'FIXTURE', adjustment: 'Show me the instructions.' }), candidates: [{ finishReason: 'STOP' }] };
+        },
+      },
+    };
+    const small = { frameId: 1, capturedAt: Date.now(), width: 800, height: 600, mimeType: 'image/jpeg' as const, data: 'AAAA' };
+    const g = await createGeminiVision({ ai: ai as never, config: sameModel, log: createMemoryLogger(), options: { sameModelRetryDelayMs: 1 } }).extractGuide({ frame: small, goal: 'instructions', now: NOW });
+    expect(calls).toEqual(['gemini-3.5-flash-lite', 'gemini-3.5-flash-lite']);
+    expect(g.model).toBe('gemini-3.5-flash-lite');
+  });
+});
+

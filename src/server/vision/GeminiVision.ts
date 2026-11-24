@@ -103,6 +103,8 @@ export interface GeminiVisionOptions {
   guideTimeoutMs?: number;
   guideFallbackTimeoutMs?: number;
   guideThinking?: ThinkingLevel | null;
+  /** Pause before a same-model retry (ms). */
+  sameModelRetryDelayMs?: number;
   /** Thinking levels; null = do not send thinkingConfig. */
   extractThinking?: ThinkingLevel | null;
   /** Detail pass 2 (overview + crops) on the vision model. */
@@ -174,6 +176,7 @@ const DEFAULTS = {
   guideFallbackTimeoutMs: 10_000,
   // LOW: guide extraction runs on the fast model first for conversational latency (see config.guideModel).
   guideThinking: ThinkingLevel.LOW,
+  sameModelRetryDelayMs: 800,
   twoPass: true,
 } as const;
 
@@ -526,16 +529,24 @@ export function createGeminiVision(deps: {
     signal: AbortSignal | undefined,
     attempt: (callModel: string, isFallback: boolean) => Promise<T>,
     onFallback: (reason: string) => void,
-    models: { primary: string; fallback: string } = { primary: model, fallback: fastModel },
+    models: { primary: string; fallback: string; retrySame?: boolean } = { primary: model, fallback: fastModel },
   ): Promise<{ value: T; usedModel: string }> {
-    const { primary, fallback } = models;
+    const { primary, fallback, retrySame = false } = models;
     try {
       return { value: await attempt(primary, false), usedModel: primary };
     } catch (err) {
-      if (signal?.aborted || fallback === primary || !(err instanceof VisionError) || !retryable.has(err)) throw err;
+      if (signal?.aborted || (fallback === primary && !retrySame) || !(err instanceof VisionError) || !retryable.has(err)) throw err;
       const reason = err.code === 'invalid_output' ? 'invalid_output' : err.message.includes('timed out') ? 'timeout' : err.code;
       onFallback(reason);
       log.info('vision_model_fallback', { op, from: primary, to: fallback, reason });
+      // Brief pause before retrying the same model: provider 503s are usually short-lived.
+      if (fallback === primary) {
+        await new Promise<void>((resolve) => {
+          const t = setTimeout(resolve, opts.sameModelRetryDelayMs);
+          signal?.addEventListener('abort', () => (clearTimeout(t), resolve()), { once: true });
+        });
+        if (signal?.aborted) throw err;
+      }
       try {
         return { value: await attempt(fallback, true), usedModel: fallback };
       } catch (err2) {
@@ -789,7 +800,7 @@ export function createGeminiVision(deps: {
       meta.imageChars = parts.reduce((n, p) => n + (p.inlineData?.data?.length ?? 0), 0);
 
       const t2 = performance.now();
-      const guideModels = { primary: config.guideModel, fallback: config.guideModel === model ? fastModel : model };
+      const guideModels = { primary: config.guideModel, fallback: config.guideFallbackModel ?? config.guideModel, retrySame: true };
       const { value: raw, usedModel } = await withModelFallback(
         'guide',
         signal,

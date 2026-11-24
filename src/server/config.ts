@@ -15,6 +15,8 @@ const EnvSchema = z.object({
   LOCATE_MODEL: z.string().min(1).default('gemini-3.5-flash-lite'),
   /** Instruction-guide extraction (conversational latency matters; measured 2026-11-24: 3.6-flash 12-14 s or timeouts). */
   GUIDE_MODEL: z.string().min(1).default('gemini-3.5-flash-lite'),
+  /** Model for the one guide retry. Empty = retry GUIDE_MODEL after a short pause (503s are usually brief). */
+  GUIDE_FALLBACK_MODEL: z.string().optional(),
   /** Allow Gemini box detection for find queries outside the supported YOLO list (off: supported list only). */
   FIND_GEMINI: boolish,
   LIVE_VOICE: z.string().min(1).default('Kore'),
@@ -41,6 +43,8 @@ export interface AppConfig {
   locateModel: string;
   /** Primary model for instruction-guide extraction; falls back once to visionModel (or locateModel). */
   guideModel: string;
+  /** Model for the single guide retry (defaults to guideModel: a paused retry of the same fast model). */
+  guideFallbackModel: string;
   /** Gemini-based find for unsupported items (default false: honest supported-list only). */
   findGemini: boolean;
   liveVoice: string;
@@ -86,6 +90,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     visionModel: e.VISION_MODEL,
     locateModel: e.LOCATE_MODEL,
     guideModel: e.GUIDE_MODEL,
+    guideFallbackModel: blank(e.GUIDE_FALLBACK_MODEL) ?? e.GUIDE_MODEL,
     findGemini: e.FIND_GEMINI,
     liveVoice: e.LIVE_VOICE,
     language: e.ASSISTANT_LANGUAGE,
