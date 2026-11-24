@@ -25,8 +25,10 @@ import {
   type ClientSettings,
   type Detection,
   type ErrorCode,
+  type FindPromptKind,
   type FramePayload,
   type NormalizedBox,
+  type ServerDetections,
   type ServerFind,
   type ServerMessage,
   type ServerMessageOf,
@@ -44,14 +46,25 @@ import { createLiveBridge, LiveConnectError, type LiveBridge } from '../live/Liv
 import { buildLiveConnectConfig } from '../live/liveConfig.js';
 import {
   compactEvidence,
+  FIND_ERROR_GUIDANCE,
+  FIND_FAILED_GUIDANCE,
+  FIND_GUIDANCE,
   FIND_OBJECT_GUIDANCE,
   FIND_OBJECT_NOT_VISIBLE_GUIDANCE,
+  FIND_SELECT_GUIDANCE,
   FIND_SHARP_GUIDANCE,
+  FIND_UNSUPPORTED_GUIDANCE,
   parseToolCall,
+  SELECTED_GUIDANCE,
+  STOPPED_GUIDANCE,
+  subjectUnconfirmedGuidance,
   type ToolName,
 } from '../live/tools.js';
-import { cocoMatch, isSharpQuery, pickTarget } from '../../shared/find.js';
-import { FindTracker, TERMINAL_FIND_STATES, type FindSource } from './findTracker.js';
+import { createDetectScheduler } from '../vision/detector.js';
+import { FIND_PROMPT_TEXT, isSharpQuery, pickTarget } from '../../shared/find.js';
+import { resolveFindTarget, SUPPORTED_FIND_SENTENCE } from '../../shared/findTargets.js';
+import { FindMachine, TERMINAL_FIND_STATES, terminalFindMessage } from './findTracker.js';
+import { GeminiFindTracker } from './geminiFindTracker.js';
 import { TurnTracker, type TurnState } from './turns.js';
 
 export interface ClientSessionOptions {
@@ -63,9 +76,9 @@ export interface ClientSessionOptions {
   sessionLimitNoticeMs?: number;
   /** Max concurrent vision requests (snapshot answers / explicit label reads) per session. */
   maxConcurrentVision?: number;
-  /** find_object waits this long for a first detection/locate result before answering the model. */
+  /** find_object waits this long for a first non-searching find state before answering the model. */
   findToolWaitMs?: number;
-  /** Find-mode tick (lost / not_found checks). */
+  /** Find-mode tick (lost / not_seen / camera checks). */
   findTickMs?: number;
   /** Abort a vision.locate call after this long (treated as "no update"). */
   locateTimeoutMs?: number;
@@ -79,21 +92,14 @@ export const LIVE_READ_LABEL_PREFIX =
 export const LIVE_READ_LABEL_SUFFIX = ' Summarise the most useful part in one or two short sentences, then offer to read more.';
 export const LIVE_LOOK_AGAIN_TEXT = 'Look again at the newest image and answer my last question again, briefly.';
 export const LIVE_REPEAT_TEXT = 'Please repeat your last answer.';
-export const FIND_UNAVAILABLE_MESSAGE =
-  'Find is not available: this server has neither the object detector nor Gemini vision configured.';
-export const FIND_COCO_ONLY_MESSAGE =
-  'Without Gemini vision, find works only for common objects such as a cup, bottle, bowl, phone or book.';
 /** While detect.frame messages keep arriving, ambient (Live) frames are not also sent to the detector. */
 const DETECT_FRAME_ACTIVE_MS = 2_000;
 /** A locate result for a frame older than this is ignored (the camera has probably moved). */
 const LOCATE_RESULT_MAX_AGE_MS = 4_000;
-
-/** One-line app event telling Live the find target is centred (sent at most once per tool-started find). */
-export function centeredEventText(query: string): string {
-  const q = query.replace(/[[\]\r\n]/g, ' ').replace(/^\s*(the|a|an|my)\s+/i, '').trim().slice(0, 80);
-  const sharp = isSharpQuery(q) ? ' It may be sharp: do not guide their hand toward it.' : '';
-  return `[Sightline app event: the ${q} is now centred in the picture.] Confirm in at most six words.${sharp}`;
-}
+/** No camera frames for this long during find -> 'error' ("I can't see camera frames right now."). */
+export const FIND_NO_FRAMES_MS = 5_000;
+/** This many consecutive detector failures during find -> 'error'. A cooldown or disabled detector is immediate. */
+export const FIND_DETECTOR_FAILURES = 3;
 
 const clampBox = (b: NormalizedBox): NormalizedBox => {
   const c = (v: number) => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
@@ -102,21 +108,41 @@ const clampBox = (b: NormalizedBox): NormalizedBox => {
   return { x, y, w: Math.min(c(b.w), 1 - x), h: Math.min(c(b.h), 1 - y) };
 };
 
-interface ActiveFind {
+interface FindBase {
   id: number;
-  tracker: FindTracker;
+  requestId: string;
+  query: string;
   viaTool: boolean;
-  /** Aborts an in-flight vision.locate when the find ends. */
+  startedAt: number;
+  /** Server time of the latest camera frame used for detection during this find. */
+  lastFrameAt: number;
+  /** Aborts in-flight find work (vision.locate) when the find ends. */
   ac: AbortController;
-  locateInFlight: boolean;
-  lastLocateAt: number;
-  locateFailures: number;
   timeoutTimer: ReturnType<typeof setTimeout> | null;
   tickTimer: ReturnType<typeof setTimeout> | null;
   waiters: Set<(m: ServerFind) => void>;
-  centeredEventSent: boolean;
-  centeredEventPending: boolean;
 }
+
+/** Supported-list find: local YOLO detector + FindMachine (tracking, selection, prompts). */
+interface YoloFind extends FindBase {
+  kind: 'yolo';
+  machine: FindMachine;
+  detectorFailures: number;
+}
+
+/** Optional legacy path for unsupported items (config.findGemini): Gemini box detection, no prompts. */
+interface GeminiFind extends FindBase {
+  kind: 'gemini';
+  tracker: GeminiFindTracker;
+  locateInFlight: boolean;
+  lastLocateAt: number;
+  locateFailures: number;
+}
+
+type ActiveFind = YoloFind | GeminiFind;
+
+/** Why a find ends; decides the terminal state and the app prompt. */
+type FindEndReason = 'user' | 'tool' | 'replaced' | 'hidden' | 'timeout' | 'detector' | 'camera' | 'bye';
 
 export const MISSING_CREDENTIALS_MESSAGE =
   'The server has no Gemini API key configured. Add GEMINI_API_KEY to .env and restart.';
@@ -152,8 +178,8 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   const minFrameIntervalMs = opts.minFrameIntervalMs ?? 950;
   const sessionLimitNoticeMs = opts.sessionLimitNoticeMs ?? 60_000;
   const maxConcurrentVision = opts.maxConcurrentVision ?? 2;
-  const findToolWaitMs = opts.findToolWaitMs ?? 3_000;
-  const findTickMs = opts.findTickMs ?? 250;
+  const findToolWaitMs = opts.findToolWaitMs ?? 1_500;
+  const findTickMs = opts.findTickMs ?? 100;
   const locateTimeoutMs = opts.locateTimeoutMs ?? 6_000;
   const sessionId = randomUUID();
 
@@ -211,7 +237,14 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     finds: 0,
     locateCalls: 0,
     locateFailures: 0,
+    detectorFailures: 0,
   };
+
+  const scheduler = createDetectScheduler({
+    detector,
+    onResult: (result) => onDetectorResult(result),
+    onFailure: (kind) => onDetectorFailure(kind),
+  });
 
   // ---------------------------------------------------------------------------
   // Output helpers (all gated on `disposed`)
@@ -304,42 +337,63 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     return ok;
   }
 
-  /** Run the local detector on a frame; marks/sends the find target when a YOLO find is active. */
-  function runDetector(frame: FramePayload) {
-    const ac = newController();
-    detector
-      .detect(frame, ac.signal)
-      .then((result) => {
-        if (disposed || !result) return;
-        if (result.frameId <= lastDetectionsFrameId) return;
-        const f = find && find.tracker.source === 'yolo' ? find : null;
-        if (!settings.detections && !f) return;
-        lastDetectionsFrameId = result.frameId;
-        let detections: Detection[] = result.detections.slice(0, LIMITS.maxDetections);
-        let target: Detection | null = null;
-        if (f) {
-          target = pickTarget(detections, f.tracker.query, f.tracker.previousBox);
-          if (target) detections = detections.map((d) => (d === target ? { ...d, target: true } : d));
-        }
-        const base = { ...result, type: 'detections' as const, source: 'yolo' as const };
-        if (settings.detections) send({ ...base, detections });
-        else if (target) send({ ...base, detections: [{ ...target, target: true }] });
-        if (f && find === f) {
-          const m = f.tracker.observe(result.frameId, target, Date.now());
-          if (m) emitFind(f, m);
-        }
-      })
-      .catch(() => {
-        /* detector failures are reported by its own health(); never fabricate */
-      })
-      .finally(() => releaseController(ac));
+  // ---------------------------------------------------------------------------
+  // Detection: per-session latest-frame scheduler -> overlay + YOLO find
+  // ---------------------------------------------------------------------------
+
+  const activeYolo = (): YoloFind | null => (find && find.kind === 'yolo' ? find : null);
+
+  /** The detector is needed for overlays or for a YOLO find. */
+  const detectorWanted = () => detector.enabled && !paused && (settings.detections || activeYolo() !== null);
+
+  /** Drop pending / in-flight detection work when nothing needs it any more (nothing survives a stop). */
+  function releaseDetectorIfIdle() {
+    if (!detectorWanted()) scheduler.cancel();
+  }
+
+  function onDetectorResult(result: ServerDetections) {
+    if (disposed) return;
+    if (result.frameId <= lastDetectionsFrameId) return; // out of order
+    const f = activeYolo();
+    if (!settings.detections && !f) return;
+    lastDetectionsFrameId = result.frameId;
+    let detections: Detection[] = result.detections.slice(0, LIMITS.maxDetections);
+    let target: Detection | null = null;
+    let msg: ServerFind | null = null;
+    if (f) {
+      f.detectorFailures = 0;
+      const r = f.machine.observe(
+        { frameId: result.frameId, capturedAt: result.capturedAt, serverCapturedAt: result.capturedAt + skewMs, detections },
+        Date.now(),
+      );
+      msg = r.message;
+      target = r.target;
+      if (target) {
+        const t = target;
+        detections = detections.map((d) => (d === t ? { ...d, target: true } : d));
+      }
+    }
+    const base = { ...result, type: 'detections' as const, source: 'yolo' as const };
+    if (settings.detections) send({ ...base, detections });
+    else if (target) send({ ...base, detections: [{ ...target, target: true }] });
+    if (f && msg) emitFind(f, msg);
+  }
+
+  /** Detector failures never break the session: the find ends in 'error'; conversation continues. */
+  function onDetectorFailure(kind: 'failed' | 'cooldown' | 'disabled') {
+    if (disposed) return;
+    counters.detectorFailures++;
+    const f = activeYolo();
+    if (!f) return;
+    f.detectorFailures++;
+    if (kind !== 'failed' || f.detectorFailures >= FIND_DETECTOR_FAILURES) endFind('detector');
   }
 
   /**
-   * Gemini box detection for the active find, at most every locateMinIntervalMs, one call in flight, aborted after
-   * locateTimeoutMs. A failed or slow locate is "no update": the last state stands until the lost / not_found timers.
+   * Gemini box detection for the active legacy find, at most every locateMinIntervalMs, one call in flight, aborted
+   * after locateTimeoutMs. A failed or slow locate is "no update". Used only when config.findGemini is on.
    */
-  function maybeLocate(f: ActiveFind, frame: FramePayload) {
+  function maybeLocate(f: GeminiFind, frame: FramePayload) {
     if (!vision || f.locateInFlight || f.ac.signal.aborted) return;
     const started = Date.now();
     if (started - f.lastLocateAt < LIMITS.locateMinIntervalMs) return;
@@ -398,12 +452,13 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   /** Detection / find work for a frame (from detect.frame, or an ambient frame from an older client). */
   function processDetectionFrame(frame: FramePayload) {
     const f = find;
-    if (f && f.tracker.source === 'gemini') {
+    if (f) f.lastFrameAt = Date.now();
+    if (f?.kind === 'gemini') {
       // The detector is not needed while Gemini tracks a specific item; frees it and keeps one box source.
       maybeLocate(f, frame);
       return;
     }
-    if (detector.enabled && (settings.detections || f)) runDetector(frame);
+    if (detectorWanted()) scheduler.submit(frame);
   }
 
   function onDetectFrame(frame: FramePayload) {
@@ -432,40 +487,48 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   }
 
   // ---------------------------------------------------------------------------
-  // Find mode
+  // Find mode (one per session; the newest requestId wins)
   // ---------------------------------------------------------------------------
-
-  function chooseFindSource(query: string): { source: FindSource } | { error: string } {
-    const coco = cocoMatch(query);
-    // Modified queries ("the red mug") go to Gemini when available: YOLO cannot tell which mug is red.
-    if (coco && detector.enabled && (coco.exact || !vision)) return { source: 'yolo' };
-    if (vision) return { source: 'gemini' };
-    if (detector.enabled) return { error: FIND_COCO_ONLY_MESSAGE };
-    return { error: FIND_UNAVAILABLE_MESSAGE };
-  }
 
   function emitFind(f: ActiveFind, m: ServerFind) {
     if (find !== f) return;
     send(m);
     for (const w of [...f.waiters]) w(m);
-    if (TERMINAL_FIND_STATES.has(m.state)) {
-      log.info('find_ended', { state: m.state, source: f.tracker.source, viaTool: f.viaTool });
-      cleanupFind(f);
-      return;
-    }
-    if (m.state === 'centered') maybeSendCenteredEvent(f);
+    if (TERMINAL_FIND_STATES.has(m.state)) finishFind(f, m.state);
+  }
+
+  function finishFind(f: ActiveFind, state: string) {
+    const s = scheduler.stats;
+    log.info('find_ended', {
+      state,
+      source: f.kind,
+      viaTool: f.viaTool,
+      durationMs: Date.now() - f.startedAt,
+      sessionDetectRuns: s.runs,
+      sessionDetectReplaced: s.replaced,
+      sessionDetectFailed: s.failed,
+      sessionDetectLatencyAvgMs: s.ok ? Math.round(s.latencyMsTotal / s.ok) : null,
+      sessionDetectLatencyMaxMs: Math.round(s.latencyMsMax),
+    });
+    cleanupFind(f);
   }
 
   function scheduleFindTick(f: ActiveFind) {
     f.tickTimer = later(findTickMs, () => {
       f.tickTimer = null;
       if (find !== f) return;
-      const m = f.tracker.tick(Date.now());
+      const now = Date.now();
+      if (now - Math.max(f.startedAt, f.lastFrameAt) > FIND_NO_FRAMES_MS) {
+        endFind('camera');
+        return;
+      }
+      const m = f.kind === 'yolo' ? f.machine.tick(now) : f.tracker.tick(now);
       if (m) emitFind(f, m);
       if (find === f) scheduleFindTick(f);
     });
   }
 
+  /** Clears every timer and aborts all work of a find; nothing scheduled survives. */
   function cleanupFind(f: ActiveFind) {
     f.ac.abort();
     releaseController(f.ac);
@@ -475,72 +538,96 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     f.tickTimer = null;
     f.waiters.clear();
     if (find === f) find = null;
+    releaseDetectorIfIdle();
   }
 
-  /** End the active find. `silent` (a new find replaces it) resolves waiters without telling the client. */
-  function endFind(state: 'stopped' | 'timeout', silent = false) {
+  /** End the active find. 'replaced' and 'bye' tell the client nothing (the new requestId wins / socket closing). */
+  function endFind(reason: FindEndReason) {
     const f = find;
     if (!f) return;
-    const m = f.tracker.stop(state, Date.now());
+    const now = Date.now();
+    const state: 'stopped' | 'timeout' | 'error' =
+      reason === 'timeout' ? 'timeout' : reason === 'detector' || reason === 'camera' ? 'error' : 'stopped';
+    let prompt: { kind: FindPromptKind; text: string } | null = null;
+    if (reason === 'user' || reason === 'tool') prompt = { kind: 'stopped', text: FIND_PROMPT_TEXT.stopped() };
+    else if (reason === 'timeout' && f.kind === 'yolo') prompt = { kind: 'stopped', text: FIND_PROMPT_TEXT.timeout(f.machine.target) };
+    else if (reason === 'detector') prompt = { kind: 'error', text: FIND_PROMPT_TEXT.detectorError() };
+    else if (reason === 'camera') prompt = { kind: 'error', text: FIND_PROMPT_TEXT.cameraError() };
+    let m: ServerFind | null;
+    if (f.kind === 'yolo') m = f.machine.stop(state, now, prompt);
+    else {
+      const b = f.tracker.stop(state === 'timeout' ? 'timeout' : 'stopped', now);
+      m = b ? { ...b, state, prompt } : null;
+    }
     if (m) {
-      if (!silent) send(m);
+      if (reason !== 'replaced' && reason !== 'bye') send(m);
       for (const w of [...f.waiters]) w(m);
     }
-    log.info('find_ended', { state, source: f.tracker.source, viaTool: f.viaTool });
-    cleanupFind(f);
+    finishFind(f, state);
   }
 
-  function startFind(query: string, requestId: string | null, viaTool: boolean): ActiveFind | { error: string } {
-    const choice = chooseFindSource(query);
-    if ('error' in choice) return choice;
-    endFind('stopped', true);
-    const ac = newController();
-    const f: ActiveFind = {
-      id: ++findCounter,
-      tracker: new FindTracker({ query, requestId, source: choice.source, startedAt: Date.now() }),
+  type StartFindResult = { find: ActiveFind } | { terminal: ServerFind };
+
+  /**
+   * Start a find. Supported items (resolveFindTarget) use the local detector; without one -> 'error'. Anything else
+   * -> 'unsupported', unless config.findGemini allows the legacy Gemini-locate path. Tool-started finds carry no
+   * spoken prompt in an immediate unsupported/error reply because the model explains it instead (no double speech).
+   */
+  function startFind(query: string, requestId: string, viaTool: boolean): StartFindResult {
+    endFind('replaced');
+    scheduler.cancel(); // no frame or late result from before this request is used
+    const id = ++findCounter;
+    const now = Date.now();
+    const target = resolveFindTarget(query);
+    const base = (): FindBase => ({
+      id,
+      requestId,
+      query,
       viaTool,
-      ac,
-      locateInFlight: false,
-      lastLocateAt: Number.NEGATIVE_INFINITY,
-      locateFailures: 0,
+      startedAt: now,
+      lastFrameAt: Number.NEGATIVE_INFINITY,
+      ac: newController(),
       timeoutTimer: null,
       tickTimer: null,
       waiters: new Set(),
-      centeredEventSent: false,
-      centeredEventPending: false,
-    };
+    });
+    let f: ActiveFind;
+    if (target && detector.enabled) {
+      f = { ...base(), kind: 'yolo', machine: new FindMachine({ target, query, requestId, startedAt: now }), detectorFailures: 0 };
+    } else if (config.findGemini && vision) {
+      f = {
+        ...base(),
+        kind: 'gemini',
+        tracker: new GeminiFindTracker({ query, requestId, source: 'gemini', startedAt: now }),
+        locateInFlight: false,
+        lastLocateAt: Number.NEGATIVE_INFINITY,
+        locateFailures: 0,
+      };
+    } else {
+      const state = target ? 'error' : 'unsupported';
+      const prompt = viaTool
+        ? null
+        : target
+          ? { kind: 'error' as const, text: FIND_PROMPT_TEXT.detectorError() }
+          : { kind: 'unsupported' as const, text: FIND_PROMPT_TEXT.unsupported() };
+      log.info('find_rejected', { state, viaTool, detector: detector.enabled });
+      const m = terminalFindMessage({ requestId, query, state, prompt, now });
+      send(m);
+      return { terminal: m };
+    }
     find = f;
     counters.finds++;
-    log.info('find_started', { source: choice.source, viaTool });
-    send(f.tracker.start(Date.now()));
+    log.info('find_started', { source: f.kind, viaTool, target: target?.coco ?? null });
+    send(f.kind === 'yolo' ? f.machine.start(now) : f.tracker.start(now));
     f.timeoutTimer = later(LIMITS.findTimeoutMs, () => {
       if (find === f) endFind('timeout');
     });
     scheduleFindTick(f);
-    return f;
+    return { find: f };
   }
 
-  function sendCenteredEvent(f: ActiveFind) {
-    f.centeredEventPending = false;
-    if (f.centeredEventSent || !liveReady() || paused) return;
-    f.centeredEventSent = true;
-    bridge!.sendClientContent({ turns: [{ role: 'user', parts: [{ text: centeredEventText(f.tracker.query) }] }], turnComplete: true });
-    log.info('find_centered_event', { source: f.tracker.source });
-  }
-
-  /** Tell Live (once per tool-started find) that the target is centred; waits for a turn boundary if mid-turn. */
-  function maybeSendCenteredEvent(f: ActiveFind) {
-    if (!f.viaTool || f.centeredEventSent) return;
-    const t = turns.active;
-    if (t && !t.cancelled) {
-      f.centeredEventPending = true; // best effort: after the current turn completes
-      return;
-    }
-    sendCenteredEvent(f);
-  }
-
-  /** Resolves with the first visible/terminal find update, or null after `ms`. Rejects with AbortedError on abort. */
-  function waitForFirstFindResult(f: ActiveFind, ms: number, signal: AbortSignal): Promise<ServerFind | null> {
+  /** Resolves with the first find update accepted by `accept` (or a terminal one), or null after `ms`. Rejects on abort. */
+  function waitForFindUpdate(f: ActiveFind, ms: number, signal: AbortSignal, accept: (m: ServerFind) => boolean): Promise<ServerFind | null> {
     return new Promise<ServerFind | null>((resolve, reject) => {
       if (signal.aborted) return reject(new AbortedError('aborted'));
       let timer: ReturnType<typeof setTimeout> | null = null;
@@ -550,9 +637,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         signal.removeEventListener('abort', onAbort);
       };
       const waiter = (m: ServerFind) => {
-        if (m.state === 'searching' || m.state === 'lost') return;
-        // The tool response itself will say it is centred: no separate app event needed.
-        if (m.state === 'centered') f.centeredEventSent = true;
+        if (!accept(m) && !TERMINAL_FIND_STATES.has(m.state)) return;
         done();
         resolve(m);
       };
@@ -571,8 +656,21 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
 
   function onFind(msg: ClientMessageOf<'find'>) {
     if (rejectIfUnavailable(msg.requestId)) return;
-    const r = startFind(msg.query, msg.requestId, false);
-    if ('error' in r) sendError('detector_unavailable', r.error, true, { requestId: msg.requestId });
+    startFind(msg.query, msg.requestId, false);
+  }
+
+  function onFindSelect(msg: ClientMessageOf<'find.select'>) {
+    const f = activeYolo();
+    if (!f) {
+      sendError('invalid_message', 'There is nothing to choose right now.', true);
+      return;
+    }
+    const r = f.machine.select(msg.candidateId, Date.now());
+    if (!r.ok) {
+      sendError('invalid_message', r.code === 'not_visible' ? 'That one is not in the picture right now.' : 'That choice is not available right now.', true);
+      return;
+    }
+    emitFind(f, r.message);
   }
 
   // ---------------------------------------------------------------------------
@@ -652,17 +750,33 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     }
   }
 
-  async function toolReadLabel(args: { focus?: string | undefined }, signal: AbortSignal): Promise<ToolResult> {
+  /**
+   * read_label. Subject binding: while a YOLO find has a selected target that is centred (or tracked with an
+   * observation fresher than ~1 s), the read is focused on "the <noun> <position in the picture>". If the target
+   * is lost / being chosen / stale, it does NOT read unless the user asked for whatever is in view. Always a fresh
+   * snapshot.
+   */
+  async function toolReadLabel(args: { focus?: string | undefined; whateverInView?: boolean }, signal: AbortSignal): Promise<ToolResult> {
+    let focus = args.focus;
+    const yf = activeYolo();
+    if (yf) {
+      const subject = yf.machine.readSubject(Date.now());
+      if (subject.kind === 'unconfirmed' && !args.whateverInView) {
+        log.info('read_label_subject_unconfirmed', { state: yf.machine.state });
+        return { output: { status: 'subject_unconfirmed', guidance: subjectUnconfirmedGuidance(subject.noun) } };
+      }
+      if (subject.kind === 'bound') focus = args.focus ? `${subject.focus}: ${args.focus}` : subject.focus;
+    }
     const snap = await snapshotForTool('read_label', LIMITS.snapshotMaxDim, signal);
     if ('result' in snap) return snap.result;
     if (!vision) return toolError('vision_unavailable', 'Label reading is not available on this server.');
     const started = Date.now();
     try {
-      const evidence = await vision.extractLabel({ frame: snap.frame, focus: args.focus, now: clock(), signal });
+      const evidence = await vision.extractLabel({ frame: snap.frame, focus, now: clock(), signal });
       if (signal.aborted) throw new AbortedError('aborted');
-      log.info('label_extracted', { via: 'tool', latencyMs: Date.now() - started, readability: evidence.readability });
+      log.info('label_extracted', { via: 'tool', latencyMs: Date.now() - started, readability: evidence.readability, bound: focus !== args.focus });
       send({ type: 'evidence', requestId: snap.requestId, evidence });
-      return { output: { status: 'ok', frameAgeMs: Math.max(0, frameAgeMs(snap.frame)), ...compactEvidence(evidence, args.focus) } };
+      return { output: { status: 'ok', frameAgeMs: Math.max(0, frameAgeMs(snap.frame)), ...compactEvidence(evidence, focus) } };
     } catch (err) {
       if (signal.aborted || err instanceof AbortedError) throw new AbortedError('aborted');
       const f = visionFailure(err);
@@ -679,23 +793,52 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   }
 
   async function toolFindObject(args: { query: string }, signal: AbortSignal): Promise<ToolResult> {
-    const sharp = isSharpQuery(args.query) ? FIND_SHARP_GUIDANCE : '';
     const r = startFind(args.query, `tool-find-${findCounter + 1}`, true);
-    if ('error' in r) return toolError('find_unavailable', `${r.error} Tell the user briefly.`);
-    const first = await waitForFirstFindResult(r, findToolWaitMs, signal);
+    if ('terminal' in r) {
+      if (r.terminal.state === 'unsupported') {
+        return { output: { status: 'unsupported', supported: SUPPORTED_FIND_SENTENCE, guidance: FIND_UNSUPPORTED_GUIDANCE } };
+      }
+      return { output: { status: 'error', guidance: FIND_ERROR_GUIDANCE } };
+    }
+    const f = r.find;
+    if (f.kind === 'gemini') return toolFindGemini(f, args.query, signal);
+    const first = await waitForFindUpdate(f, findToolWaitMs, signal, (m) => m.state !== 'searching');
+    const status = first?.state ?? (find === f ? f.machine.state : 'stopped');
+    const candidates = first?.state === 'needs_selection' ? (first.candidates ?? []).map((c) => c.position) : [];
+    const guidance = status === 'needs_selection' ? FIND_SELECT_GUIDANCE : status === 'error' ? FIND_FAILED_GUIDANCE : FIND_GUIDANCE;
+    return { output: { status, candidates, guidance } };
+  }
+
+  /** Legacy Gemini-locate find (config.findGemini only): the model describes the first position itself. */
+  async function toolFindGemini(f: GeminiFind, query: string, signal: AbortSignal): Promise<ToolResult> {
+    const sharp = isSharpQuery(query) ? FIND_SHARP_GUIDANCE : '';
+    const first = await waitForFindUpdate(f, findToolWaitMs, signal, (m) => m.state === 'tracking' || m.state === 'centered');
     if (first && (first.state === 'tracking' || first.state === 'centered') && first.description) {
       return { output: { status: first.state, description: first.description, guidance: FIND_OBJECT_GUIDANCE + sharp } };
     }
-    const stillSearching = find === r;
+    const stillSearching = find === f;
     return {
       output: {
         status: 'not_visible',
         description: stillSearching ? 'Not in the picture yet; still searching.' : 'Not found in the picture.',
-        guidance: stillSearching
-          ? FIND_OBJECT_NOT_VISIBLE_GUIDANCE + sharp
-          : 'Tell the user in one short sentence that it was not found in the picture.',
+        guidance: stillSearching ? FIND_OBJECT_NOT_VISIBLE_GUIDANCE + sharp : 'Tell the user in one short sentence that it was not found in the picture.',
       },
     };
+  }
+
+  function toolSelectTarget(args: { choice: 'left' | 'middle' | 'right' }): ToolResult {
+    const f = activeYolo();
+    if (!f) return toolError('not_finding', 'Find mode is not active. If the user wants to find something, call find_object.');
+    const r = f.machine.selectByPosition(args.choice, Date.now());
+    if (!r.ok) return toolError(r.code, `${r.message} Tell the user briefly.`);
+    emitFind(f, r.message);
+    return { output: { status: 'selected', position: r.position, guidance: SELECTED_GUIDANCE } };
+  }
+
+  function toolStopFinding(): ToolResult {
+    if (!find) return { output: { status: 'not_finding', guidance: 'Find mode was not running. Reply in a few words.' } };
+    endFind('tool');
+    return { output: { status: 'stopped', guidance: STOPPED_GUIDANCE } };
   }
 
   function respondToTool(id: string, name: string, response: ToolResult) {
@@ -718,17 +861,29 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     send({ type: 'tool', callId, name: parsed.name, state: 'started' });
     const started = Date.now();
     try {
-      const result =
-        parsed.name === 'read_label'
-          ? await toolReadLabel(parsed.args, ac.signal)
-          : parsed.name === 'find_object'
-            ? await toolFindObject(parsed.args, ac.signal)
-            : await toolLookAgain(ac.signal);
+      let result: ToolResult;
+      switch (parsed.name) {
+        case 'read_label':
+          result = await toolReadLabel(parsed.args, ac.signal);
+          break;
+        case 'find_object':
+          result = await toolFindObject(parsed.args, ac.signal);
+          break;
+        case 'select_target':
+          result = toolSelectTarget(parsed.args);
+          break;
+        case 'stop_finding':
+          result = toolStopFinding();
+          break;
+        case 'look_again':
+          result = await toolLookAgain(ac.signal);
+          break;
+      }
       if (ac.signal.aborted || disposed) return;
       respondToTool(id, parsed.name, result);
-      const failed = 'error' in result;
-      send({ type: 'tool', callId, name: parsed.name, state: failed ? 'failed' : 'completed' });
-      log.info('tool_done', { name: parsed.name, ok: !failed, latencyMs: Date.now() - started, ...(failed ? { code: result.error.code } : {}) });
+      const code = 'error' in result ? result.error.code : null;
+      send({ type: 'tool', callId, name: parsed.name, state: code ? 'failed' : 'completed' });
+      log.info('tool_done', { name: parsed.name, ok: !code, latencyMs: Date.now() - started, ...(code ? { code } : {}) });
     } catch (err) {
       if (ac.signal.aborted || disposed || err instanceof AbortedError) return;
       log.error('tool_failed', { name: parsed.name, error: err instanceof Error ? err.name : 'unknown' });
@@ -816,8 +971,6 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         pushHistory('user', t.userText);
         pushHistory('assistant', t.assistantText);
       }
-      const f = find;
-      if (f?.centeredEventPending && f.tracker.state === 'centered' && !turns.active) sendCenteredEvent(f);
       bridge?.reconnectIfGoAwayPending();
     }
   }
@@ -1173,7 +1326,10 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       bridge!.sendRealtimeInput({ audioStreamEnd: true });
       audioStreamOpen = false;
     }
-    if (hidden) endFind('stopped');
+    if (hidden) {
+      endFind('hidden');
+      scheduler.cancel();
+    }
     log.info('visibility', { hidden });
     if (phase === 'live' || phase === 'snapshot') sendStatus(statusForPhase());
   }
@@ -1193,7 +1349,9 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       case 'find':
         return onFind(msg);
       case 'find.stop':
-        return endFind('stopped');
+        return endFind('user');
+      case 'find.select':
+        return onFindSelect(msg);
       case 'text':
         return onText(msg);
       case 'action':
@@ -1206,6 +1364,8 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       case 'snapshot.unavailable': {
         const p = pendingSnapshots.get(msg.requestId);
         if (p) p.resolve({ kind: 'unavailable', reason: msg.reason });
+        // The camera is off or denied: find cannot continue (the conversation does).
+        if (msg.reason === 'camera_off' || msg.reason === 'camera_denied') endFind('camera');
         return;
       }
       case 'playback.stop':
@@ -1214,9 +1374,10 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         return onVisibility(msg);
       case 'settings':
         settings = msg.settings;
+        releaseDetectorIfIdle();
         return;
       case 'bye':
-        endFind('stopped');
+        endFind('bye');
         dispose('bye');
         channel.close(1000, 'bye');
         return;
@@ -1256,6 +1417,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   function dispose(reason: string) {
     if (disposed) return;
     if (find) cleanupFind(find);
+    scheduler.cancel();
     disposed = true;
     phase = 'disposed';
     for (const t of timers) clearTimeout(t);
@@ -1267,7 +1429,18 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     for (const p of [...pendingSnapshots.values()]) p.reject(new AbortedError('disposed'));
     pendingSnapshots.clear();
     inflightTools.clear();
-    log.info('session_disposed', { reason: reason.slice(0, 40), ...counters });
+    const s = scheduler.stats;
+    log.info('session_disposed', {
+      reason: reason.slice(0, 40),
+      ...counters,
+      detectRuns: s.runs,
+      detectReplaced: s.replaced,
+      detectOutOfOrder: s.outOfOrder,
+      detectLate: s.lateResults,
+      detectBusy: s.busy,
+      detectLatencyAvgMs: s.ok ? Math.round(s.latencyMsTotal / s.ok) : null,
+      detectLatencyMaxMs: Math.round(s.latencyMsMax),
+    });
   }
 
   return { handleRaw, dispose };

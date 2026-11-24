@@ -7,6 +7,7 @@
  * not a distance claim.
  */
 import type { Detection, NormalizedBox } from './protocol.js';
+import { SUPPORTED_FIND_SENTENCE, type FindTarget } from './findTargets.js';
 
 /** The 80 COCO classes, as named by the Ultralytics YOLO models behind DetectorService. */
 export const COCO_CLASSES = [
@@ -201,11 +202,14 @@ export function sizeWord(area: number): 'small' | 'medium' | 'large' {
   return 'large';
 }
 
-/** Short image-relative text, e.g. "left of the picture, near the top, small". */
-export function describePosition(box: NormalizedBox): string {
+/**
+ * Short image-relative text, e.g. "left of the picture, near the top, small". `centered` overrides the default
+ * centre test (pass the find state's own hysteresis-aware decision so the words never contradict the state).
+ */
+export function describePosition(box: NormalizedBox, centered: boolean = isCentered(box)): string {
   const { cx, cy } = boxCenter(box);
   const size = sizeWord(boxArea(box));
-  if (isCentered(box)) return `in the centre of the picture, ${size}`;
+  if (centered) return `in the centre of the picture, ${size}`;
   const parts: string[] = [];
   if (cx < 0.38) parts.push('left of the picture');
   else if (cx > 0.62) parts.push('right of the picture');
@@ -266,3 +270,85 @@ export function pickTarget(
   }
   return best;
 }
+
+// ---------------------------------------------------------------------------
+// Directional find (YOLO, supported targets only): geometry and app-generated prompt texts
+// ---------------------------------------------------------------------------
+
+export type CandidatePosition = 'left' | 'middle' | 'right';
+
+/** Horizontal / vertical error of the box centre from the picture centre (cx - 0.5, cy - 0.5), unmirrored frame. */
+export function centerError(box: NormalizedBox): { dx: number; dy: number } {
+  const { cx, cy } = boxCenter(box);
+  return { dx: cx - 0.5, dy: cy - 0.5 };
+}
+
+/** |dx| <= zone.x AND |dy| <= zone.y (e.g. LIMITS.findCenterEnter / findCenterExit). */
+export function inCenterZone(box: NormalizedBox, zone: { readonly x: number; readonly y: number }): boolean {
+  const { dx, dy } = centerError(box);
+  return Math.abs(dx) <= zone.x && Math.abs(dy) <= zone.y;
+}
+
+/** Normalised distance between two box centres. */
+export function centerDistance(a: NormalizedBox, b: NormalizedBox): number {
+  const ca = boxCenter(a);
+  const cb = boxCenter(b);
+  return Math.hypot(ca.cx - cb.cx, ca.cy - cb.cy);
+}
+
+/** Which third of the picture a box centre is in (same thresholds as describePosition). */
+export function horizontalThird(box: NormalizedBox): CandidatePosition {
+  const { cx } = boxCenter(box);
+  if (cx < 0.38) return 'left';
+  if (cx > 0.62) return 'right';
+  return 'middle';
+}
+
+/**
+ * Positions for candidate boxes already sorted left -> right: 2 -> left, right; 3 -> left, middle, right;
+ * 4+ -> left, middle..., right (the inner ones are all "middle" and need the on-screen control). A single
+ * candidate gets the third of the picture it is in.
+ */
+export function positionsLeftToRight(boxes: readonly NormalizedBox[]): CandidatePosition[] {
+  const n = boxes.length;
+  if (n === 0) return [];
+  if (n === 1) return [horizontalThird(boxes[0]!)];
+  return boxes.map((_, i) => (i === 0 ? 'left' : i === n - 1 ? 'right' : 'middle'));
+}
+
+const COUNT_WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six'];
+const countWord = (n: number) => COUNT_WORDS[n] ?? String(n);
+const withArticle = (noun: string) => (/^[aeiou]/i.test(noun) ? `an ${noun}` : `a ${noun}`);
+const capitalise = (s: string) => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** "on the left of the picture" / "in the middle of the picture" / "in the centre of the picture". */
+export function placePhrase(position: CandidatePosition | 'centre'): string {
+  return position === 'left' || position === 'right' ? `on the ${position} of the picture` : `in the ${position} of the picture`;
+}
+
+const choiceQuestion = (n: number) => (n === 2 ? 'The left one or the right one?' : 'The left, middle or right one?');
+
+/**
+ * App-generated find prompts (spoken by the client). Never model prose. Positions are about the camera picture
+ * only; nothing here is a distance, a walking direction or reaching guidance.
+ */
+export const FIND_PROMPT_TEXT = {
+  notSeen: (t: FindTarget) => `I don't see ${withArticle(t.noun)} yet. Slowly scan the camera across the table.`,
+  select: (t: FindTarget, count: number) => `I see ${countWord(count)} ${t.plural}. ${choiceQuestion(count)}`,
+  reselect: (t: FindTarget, positions: readonly CandidatePosition[]) => {
+    if (positions.length >= 2) return `I see more than one ${t.noun} now. ${choiceQuestion(positions.length)}`;
+    const p = positions[0] ?? 'middle';
+    return `I can see ${withArticle(t.noun)} ${placePhrase(p)}, but I'm not sure it's the same one. Say "the ${p} one" to follow it.`;
+  },
+  foundAuto: (t: FindTarget) => `Found ${withArticle(t.noun)}. Follow the sound.`,
+  foundChosen: (t: FindTarget, position: CandidatePosition) => `Okay, the ${position} ${t.noun}. Follow the sound.`,
+  centred: (t: FindTarget) => `${capitalise(t.noun)} centred in the camera.`,
+  tiltUp: () => 'Tilt the phone up slightly.',
+  tiltDown: () => 'Tilt the phone down slightly.',
+  lost: (t: FindTarget) => `I've lost the ${t.noun}. Move the camera back slowly.`,
+  unsupported: () => `I can only find ${SUPPORTED_FIND_SENTENCE} for now. You can still ask me what's in view.`,
+  stopped: () => 'Stopped finding.',
+  timeout: (t: FindTarget) => `I've stopped looking for the ${t.noun}. Ask again if you still need it.`,
+  detectorError: () => "Object finding isn't available right now. You can still ask me about what the camera sees.",
+  cameraError: () => "I can't see camera frames right now.",
+} as const;

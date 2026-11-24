@@ -1,9 +1,16 @@
 /** Detector HTTP client tests with a FIXTURE fake fetch (no network). */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { LIMITS, ServerDetections, type FramePayload } from '../../shared/protocol.js';
 import type { AppConfig } from '../config.js';
 import { createMemoryLogger } from '../log.js';
-import { createDetector, isNewerDetection } from './detector.js';
+import {
+  createDetectScheduler,
+  createDetector,
+  detectWithOutcome,
+  isNewerDetection,
+  type DetailedDetectorService,
+  type DetectOutcome,
+} from './detector.js';
 
 const URL_ = 'http://127.0.0.1:8765';
 const cfg = (detectorUrl: string | null) => ({ detectorUrl }) as AppConfig;
@@ -174,6 +181,153 @@ describe('createDetector', () => {
     expect(await setup(() => Promise.reject(new TypeError('ECONNREFUSED'))).det.health()).toBe('unreachable');
     expect(await setup(() => Promise.resolve(json({ ok: false }))).det.health()).toBe('unreachable');
     expect(await setup(() => Promise.resolve(json({}, 503))).det.health()).toBe('unreachable');
+  });
+});
+
+describe('detectWithOutcome', () => {
+  it('reports why there is no result: busy, cooldown, failed, disabled', async () => {
+    let release!: () => void;
+    const { det, advance } = setup(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve(json(okBody(1)));
+        }),
+    );
+    const first = det.detectWithOutcome(frame(1));
+    expect(await det.detectWithOutcome(frame(2))).toEqual({ kind: 'busy' });
+    release();
+    expect((await first).kind).toBe('ok');
+    advance(10);
+    expect(await det.detectWithOutcome(frame(3))).toEqual({ kind: 'busy' }); // min interval
+
+    const failing = setup(() => Promise.reject(new TypeError('fetch failed')));
+    for (let i = 1; i <= 3; i++) {
+      expect(await failing.det.detectWithOutcome(frame(i))).toEqual({ kind: 'failed', reason: 'unreachable' });
+      failing.advance(1_000);
+    }
+    expect(await failing.det.detectWithOutcome(frame(4))).toEqual({ kind: 'cooldown' });
+    expect(await createDetector({ config: cfg(null), log: createMemoryLogger() }).detectWithOutcome(frame(1))).toEqual({ kind: 'disabled' });
+  });
+
+  it('adapts plain DetectorService fakes: null or throw = failed', async () => {
+    const base = { enabled: true, model: 'x', health: () => Promise.resolve('ok' as const) };
+    expect(await detectWithOutcome({ ...base, detect: () => Promise.resolve(null) }, frame(1))).toEqual({ kind: 'failed', reason: 'no_result' });
+    expect(await detectWithOutcome({ ...base, detect: () => Promise.reject(new Error('x')) }, frame(1))).toEqual({ kind: 'failed', reason: 'threw' });
+    expect(await detectWithOutcome({ ...base, enabled: false, detect: () => Promise.resolve(null) }, frame(1))).toEqual({ kind: 'disabled' });
+  });
+
+  it('keeps boxes down to the tracker low-score floor (0.30)', async () => {
+    const { det } = setup(() => Promise.resolve(json({ frameId: 1, detections: [{ label: 'cup', score: 0.31, box: { x: 0, y: 0, w: 0.1, h: 0.1 } }] })));
+    expect((await det.detect(frame(1)))!.detections).toHaveLength(1);
+  });
+});
+
+describe('createDetectScheduler (latest-frame slot)', () => {
+  /** FIXTURE detector whose calls resolve only when the test says so. */
+  function controllable() {
+    const calls: { frame: FramePayload; resolve: (o: DetectOutcome) => void; signal?: AbortSignal | undefined }[] = [];
+    const detector: DetailedDetectorService = {
+      enabled: true,
+      model: 'fake',
+      health: () => Promise.resolve('ok'),
+      detect: () => Promise.resolve(null),
+      detectWithOutcome: (f, signal) => new Promise((resolve) => calls.push({ frame: f, resolve, signal })),
+    };
+    const results: number[] = [];
+    const failures: string[] = [];
+    let t = 0;
+    const s = createDetectScheduler({
+      detector,
+      onResult: (r) => results.push(r.frameId),
+      onFailure: (k) => failures.push(k),
+      now: () => t,
+    });
+    const ok = (f: FramePayload): DetectOutcome => ({
+      kind: 'ok',
+      result: { type: 'detections', frameId: f.frameId, capturedAt: f.capturedAt, sourceWidth: 1, sourceHeight: 1, detectedAt: 0, model: 'fake', detections: [] },
+    });
+    return { s, calls, results, failures, ok, advance: (ms: number) => (t += ms) };
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it('one call in flight; a newer frame replaces the pending one; old frames are never queued', async () => {
+    const c = controllable();
+    c.s.submit(frame(1));
+    c.s.submit(frame(2));
+    c.s.submit(frame(3));
+    expect(c.calls.map((x) => x.frame.frameId)).toEqual([1]);
+    expect(c.s.stats.replaced).toBe(1);
+    c.advance(250);
+    c.calls[0]!.resolve(c.ok(frame(1)));
+    await settle();
+    expect(c.calls.map((x) => x.frame.frameId)).toEqual([1, 3]);
+    c.calls[1]!.resolve(c.ok(frame(3)));
+    await settle();
+    expect(c.results).toEqual([1, 3]);
+    // Out-of-order submissions are rejected.
+    c.s.submit(frame(2));
+    expect(c.s.stats.outOfOrder).toBe(1);
+  });
+
+  it('delays the pending frame to respect the minimum interval instead of letting the detector refuse it', async () => {
+    vi.useFakeTimers();
+    try {
+      const c = controllable();
+      c.s.submit(frame(1));
+      c.advance(50);
+      c.calls[0]!.resolve(c.ok(frame(1)));
+      await vi.advanceTimersByTimeAsync(0);
+      c.s.submit(frame(2));
+      expect(c.calls).toHaveLength(1);
+      expect(c.s.hasPending).toBe(true);
+      c.advance(150);
+      await vi.advanceTimersByTimeAsync(150);
+      expect(c.calls.map((x) => x.frame.frameId)).toEqual([1, 2]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('rejects a late result for an older frame than one already delivered', async () => {
+    const c = controllable();
+    c.s.submit(frame(5));
+    c.advance(250);
+    c.calls[0]!.resolve(c.ok(frame(4))); // a result claiming an older frame id
+    await settle();
+    expect(c.results).toEqual([4]);
+    c.s.submit(frame(6));
+    c.advance(250);
+    c.calls[1]!.resolve(c.ok(frame(3)));
+    await settle();
+    expect(c.results).toEqual([4]);
+    expect(c.s.stats.lateResults).toBe(1);
+  });
+
+  it('reports failures, retries busy frames, and cancel() aborts and never delivers', async () => {
+    vi.useFakeTimers();
+    try {
+      const c = controllable();
+      c.s.submit(frame(1));
+      c.calls[0]!.resolve({ kind: 'failed', reason: 'timeout' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(c.failures).toEqual(['failed']);
+      c.advance(250);
+      c.s.submit(frame(2));
+      c.calls[1]!.resolve({ kind: 'busy' });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(c.calls).toHaveLength(2);
+      c.advance(250);
+      await vi.advanceTimersByTimeAsync(60);
+      expect(c.calls.map((x) => x.frame.frameId)).toEqual([1, 2, 2]); // retried
+      c.s.cancel();
+      expect(c.calls[2]!.signal?.aborted).toBe(true);
+      c.calls[2]!.resolve(c.ok(frame(2)));
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(c.results).toEqual([]);
+      expect(c.s.inFlight).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
