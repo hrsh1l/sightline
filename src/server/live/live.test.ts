@@ -41,8 +41,24 @@ describe('systemPrompt', () => {
 });
 
 describe('tools', () => {
-  it('declares exactly the five tools with JSON schemas', () => {
-    expect(functionDeclarations.map((d) => d.name)).toEqual(['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding']);
+  it('declares exactly the label, find and guide tools with JSON schemas', () => {
+    expect(functionDeclarations.map((d) => d.name)).toEqual([
+      'read_label',
+      'look_again',
+      'find_object',
+      'select_target',
+      'stop_finding',
+      'start_guide',
+      'inspect_current_view',
+      'choose_section',
+      'navigate_step',
+      'confirm_step',
+      'undo_completion',
+      'pause_guide',
+      'resume_guide',
+      'get_guide_status',
+      'stop_guide',
+    ]);
     for (const d of functionDeclarations) expect(d.parametersJsonSchema).toMatchObject({ type: 'object', additionalProperties: false });
   });
 

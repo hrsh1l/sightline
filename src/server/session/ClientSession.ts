@@ -12,6 +12,8 @@
  *  - Logs carry metadata only (event names, counts, latencies, codes) — never media, transcripts or prompts.
  *  - detect.frame images go only to the detector / vision.locate, never to Gemini Live.
  *  - At most one find per session; boxes come only from the detector or vision.locate (never invented).
+ *  - Instruction-guide progress is owned by the app (GuideMachine in a memory-only GuideStore keyed by resumeKey);
+ *    see guideController.ts. Starting a guide stops an active find.
  */
 import { randomUUID } from 'node:crypto';
 import type { FunctionCall, LiveServerContent, LiveServerMessage } from '@google/genai';
@@ -27,6 +29,7 @@ import {
   type ErrorCode,
   type FindPromptKind,
   type FramePayload,
+  type InspectPurpose,
   type NormalizedBox,
   type ServerDetections,
   type ServerFind,
@@ -64,6 +67,8 @@ import { createDetectScheduler } from '../vision/detector.js';
 import { FIND_PROMPT_TEXT, isSharpQuery, pickTarget } from '../../shared/find.js';
 import { resolveFindTarget, SUPPORTED_FIND_SENTENCE } from '../../shared/findTargets.js';
 import { FindMachine, TERMINAL_FIND_STATES, terminalFindMessage } from './findTracker.js';
+import { defaultGuideStore, type GuideStore } from '../guide/GuideStore.js';
+import { createGuideController, GuideAbortedError, type UserUtterance } from './guideController.js';
 import { GeminiFindTracker } from './geminiFindTracker.js';
 import { TurnTracker, type TurnState } from './turns.js';
 
@@ -82,6 +87,8 @@ export interface ClientSessionOptions {
   findTickMs?: number;
   /** Abort a vision.locate call after this long (treated as "no update"). */
   locateTimeoutMs?: number;
+  /** Guide progress store shared across sockets (default: process-wide memory store). */
+  guideStore?: GuideStore;
 }
 
 const HISTORY_TURNS = 6;
@@ -220,6 +227,16 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   let visionInFlight = 0;
   let snapshotCounter = 0;
   let toolCounter = 0;
+
+  // Latest user words (for confirm_step): Live input transcription of the current turn, or typed text.
+  let latestUtterance: UserUtterance | null = null;
+  let typedCounter = 0;
+  const utteranceWaiters = new Set<() => void>();
+  const noteUtterance = (id: string, text: string) => {
+    if (latestUtterance?.id === id) latestUtterance.text = text;
+    else latestUtterance = { id, text, consumed: false };
+    for (const w of [...utteranceWaiters]) w();
+  };
 
   const counters = {
     framesForwarded: 0,
@@ -677,7 +694,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
   // Snapshot requests (server asks client for a fresh capture)
   // ---------------------------------------------------------------------------
 
-  function requestSnapshot(purpose: 'read_label' | 'look_again', maxDim: number, signal: AbortSignal): Promise<SnapshotOutcome> {
+  function requestSnapshot(purpose: InspectPurpose, maxDim: number, signal: AbortSignal): Promise<SnapshotOutcome> {
     if (paused) return Promise.resolve({ kind: 'unavailable', reason: 'backgrounded' });
     const requestId = `snap-${++snapshotCounter}`;
     return new Promise<SnapshotOutcome>((resolve, reject) => {
@@ -722,8 +739,43 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
 
   const toolError = (code: string, message: string): ToolResult => ({ error: { code, message } });
 
+  const guide = createGuideController({
+    store: opts.guideStore ?? defaultGuideStore,
+    sessionId,
+    vision,
+    clock,
+    log,
+    send,
+    sendError,
+    isFresh,
+    liveReady,
+    injectLive: (text) => liveReady() && bridge!.sendClientContent({ turns: [{ role: 'user', parts: [{ text }] }], turnComplete: true }),
+    newController,
+    releaseController,
+    visionFailure,
+    snapshotForGuide: (signal) => snapshotForTool('guide', LIMITS.detailMaxDim, signal),
+    stopFind: () => {
+      if (!find) return false;
+      endFind('tool');
+      return true;
+    },
+    latestUtterance: () => latestUtterance,
+    waitForUtterance: (ms) =>
+      new Promise<void>((resolve) => {
+        let t: ReturnType<typeof setTimeout> | null = null;
+        const done = () => {
+          utteranceWaiters.delete(done);
+          cancelLater(t);
+          resolve();
+        };
+        utteranceWaiters.add(done);
+        t = later(Math.max(0, ms), done);
+        if (disposed) done();
+      }),
+  });
+
   async function snapshotForTool(
-    purpose: 'read_label' | 'look_again',
+    purpose: InspectPurpose,
     maxDim: number,
     signal: AbortSignal,
   ): Promise<{ result: ToolResult } | { frame: FramePayload; requestId: string }> {
@@ -878,6 +930,9 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         case 'look_again':
           result = await toolLookAgain(ac.signal);
           break;
+        default:
+          result = await guide.runTool(parsed, id, ac.signal);
+          break;
       }
       if (ac.signal.aborted || disposed) return;
       respondToTool(id, parsed.name, result);
@@ -885,7 +940,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       send({ type: 'tool', callId, name: parsed.name, state: code ? 'failed' : 'completed' });
       log.info('tool_done', { name: parsed.name, ok: !code, latencyMs: Date.now() - started, ...(code ? { code } : {}) });
     } catch (err) {
-      if (ac.signal.aborted || disposed || err instanceof AbortedError) return;
+      if (ac.signal.aborted || disposed || err instanceof AbortedError || err instanceof GuideAbortedError) return;
       log.error('tool_failed', { name: parsed.name, error: err instanceof Error ? err.name : 'unknown' });
       respondToTool(id, parsed.name, toolError('internal', 'The tool failed. Tell the user briefly.'));
       send({ type: 'tool', callId, name: parsed.name, state: 'failed' });
@@ -919,6 +974,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     if (userText) {
       const t = turns.forUser();
       t.userText = TurnTracker.appendText(t.userText, userText);
+      noteUtterance(`turn-${t.id}`, t.userText);
       send({ type: 'transcript', role: 'user', turnId: t.id, text: userText.slice(0, 4_000), final: false });
     }
 
@@ -1017,6 +1073,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     serverTime: Date.now(),
     maxSessionMs: config.maxSessionMs,
     timeZone: config.timeZone,
+    ...guide.readyFields(),
   });
 
   async function connectLive() {
@@ -1067,7 +1124,10 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
       const info = err instanceof LiveConnectError ? err.info : classifyProviderError(err);
       log.warn('live_connect_failed', { code: info.code, status: info.status, detail: info.detail });
       enterSnapshotFallback(info.code, info.message);
-      if (vision) send(readyMessage('snapshot'));
+      if (vision) {
+        send(readyMessage('snapshot'));
+        guide.afterReady();
+      }
       return;
     }
     if (disposed) {
@@ -1078,6 +1138,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     log.info('live_ready', { latencyMs: Date.now() - started });
     sendStatus(statusForPhase());
     send(readyMessage('live'));
+    guide.afterReady();
   }
 
   // ---------------------------------------------------------------------------
@@ -1159,6 +1220,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     }
     skewMs = Date.now() - msg.clientTime;
     settings = msg.settings;
+    guide.attach(msg.resumeKey);
     log.info('hello', { mode: msg.mode, resume: msg.resume === true, skewMs, live: liveConnector !== null, vision: vision !== null });
 
     // Session duration limit.
@@ -1184,16 +1246,19 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         features: { live: false, snapshot: vision !== null, detections: detector.enabled },
         serverTime: Date.now(),
         maxSessionMs: config.maxSessionMs,
-    timeZone: config.timeZone,
+        timeZone: config.timeZone,
+        ...guide.readyFields(),
       });
       sendError('missing_credentials', MISSING_CREDENTIALS_MESSAGE, false);
       if (vision) sendStatus('snapshot');
+      guide.afterReady();
       return;
     }
     if (msg.mode === 'snapshot' && vision) {
       phase = 'snapshot';
       sendStatus('snapshot');
       send(readyMessage('snapshot'));
+      guide.afterReady();
       return;
     }
     void connectLive();
@@ -1239,6 +1304,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         return;
       }
       if (msg.frame && isFresh(msg.frame)) forwardFrame(msg.frame, true);
+      noteUtterance(`text-${++typedCounter}`, msg.text);
       bridge!.sendRealtimeInput({ text: msg.text });
       pushHistory('user', msg.text);
       return;
@@ -1352,6 +1418,11 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         return endFind('user');
       case 'find.select':
         return onFindSelect(msg);
+      case 'guide.inspect':
+        void guide.onInspect(msg);
+        return;
+      case 'guide.action':
+        return guide.onAction(msg);
       case 'text':
         return onText(msg);
       case 'action':
@@ -1378,6 +1449,7 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
         return;
       case 'bye':
         endFind('bye');
+        guide.dispose('bye');
         dispose('bye');
         channel.close(1000, 'bye');
         return;
@@ -1418,6 +1490,8 @@ export function createClientSessionWithOptions(deps: SessionDeps, opts: ClientSe
     if (disposed) return;
     if (find) cleanupFind(find);
     scheduler.cancel();
+    guide.dispose(reason);
+    for (const w of [...utteranceWaiters]) w();
     disposed = true;
     phase = 'disposed';
     for (const t of timers) clearTimeout(t);

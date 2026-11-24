@@ -1,17 +1,18 @@
 /**
- * Function tools declared to Gemini Live. Only these five names are ever executed; anything else is rejected
+ * Function tools declared to Gemini Live. Only these names are ever executed; anything else is rejected
  * with an error response. There are deliberately no URL-fetch, shell or file tools.
  */
 import type { FunctionDeclaration } from '@google/genai';
 import { z } from 'zod';
 import { LIMITS, type LabelEvidence } from '../../shared/protocol.js';
 import { SUPPORTED_FIND_SENTENCE } from '../../shared/findTargets.js';
+import { GUIDE_TOOL_NAMES, guideFunctionDeclarations, parseGuideToolCall, type ParsedGuideToolCall } from './guideTools.js';
 
-export const TOOL_NAMES = ['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding'] as const;
+export const TOOL_NAMES = ['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding', ...GUIDE_TOOL_NAMES] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
 export const READ_LABEL_DESCRIPTION =
-  'Take a fresh high-resolution photo with the user\'s camera and extract the exact printed text, cooking instructions, dates and storage text. Use whenever the user asks to read text, a label, instructions, ingredients, allergens or dates. While find mode is following an item, "read its label" automatically refers to that item.';
+  'Take a fresh high-resolution photo with the user\'s camera and extract the exact printed text, cooking instructions, dates and storage text. Use whenever the user asks to read text, a label, instructions, ingredients, allergens or dates. While find mode is following an item, "read its label" automatically refers to that item. To be guided step by step through instructions, use start_guide instead.';
 export const LOOK_AGAIN_DESCRIPTION =
   'Take a fresh photo now, e.g. when the user says look again, has moved the item, or the current view is unclear.';
 
@@ -107,6 +108,7 @@ export const functionDeclarations: FunctionDeclaration[] = [
     description: STOP_FINDING_DESCRIPTION,
     parametersJsonSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
+  ...guideFunctionDeclarations,
 ];
 
 const ReadLabelArgs = z.object({ focus: z.string().trim().max(200).optional(), whatever_in_view: z.boolean().optional() });
@@ -122,6 +124,7 @@ export type ParsedToolCall =
   | { ok: true; name: 'find_object'; args: { query: string } }
   | { ok: true; name: 'select_target'; args: { choice: 'left' | 'middle' | 'right' } }
   | { ok: true; name: 'stop_finding'; args: Record<string, never> }
+  | ParsedGuideToolCall
   | { ok: false; error: 'unknown_tool' | 'invalid_arguments'; message: string };
 
 /** Validate a provider function call. Unknown names are never executed. */
@@ -158,6 +161,7 @@ export function parseToolCall(name: string | undefined, args: unknown): ParsedTo
       return { ok: true, name, args: {} };
     }
     default:
+      if ((GUIDE_TOOL_NAMES as readonly string[]).includes(name ?? '')) return parseGuideToolCall(name as (typeof GUIDE_TOOL_NAMES)[number], raw);
       return { ok: false, error: 'unknown_tool', message: `Unknown tool. Only ${TOOL_NAMES.join(', ')} are available.` };
   }
 }
