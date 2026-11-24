@@ -195,7 +195,7 @@ def main() -> None:
     p.add_argument("--model", default=DEFAULT_MODEL, help="Ultralytics detect weights name, stored in ./models/")
     p.add_argument("--device", default="auto", help="auto | cpu | mps")
     p.add_argument("--imgsz", type=int, default=640)
-    p.add_argument("--conf", type=float, default=0.35, help="Minimum confidence returned")
+    p.add_argument("--conf", type=float, default=0.30, help="Minimum confidence returned")
     p.add_argument("--download-only", action="store_true", help="Download the weights and exit")
     args = p.parse_args()
 

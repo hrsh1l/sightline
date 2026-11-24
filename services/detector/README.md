@@ -20,7 +20,7 @@ It **cannot** identify products or brands, read text, read dates, tell a tin of 
 freshness or doneness, or recognise anything outside those 80 classes (a jar is often "bottle" or "cup", a packet
 may be nothing at all). Boxes are approximate and may be missing or wrong; they are an overlay hint, never a basis
 for safety decisions. The service never invents boxes: it returns exactly what the model output above the
-confidence threshold (0.35 by default; the Node client also filters at 0.35).
+confidence threshold (0.30 by default, so the tracker can extend existing tracks with weaker matches; new tracks need >= 0.45).
 
 ## Run it
 

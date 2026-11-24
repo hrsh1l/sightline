@@ -144,6 +144,8 @@ export function fakePlayer() {
       return () => audibleLs.delete(cb);
     },
     close: vi.fn(async () => undefined),
+    // FIXTURE: no real AudioContext in Node tests.
+    context: null as AudioContext | null,
     setState: s.set,
   };
   return player satisfies AudioPlayer;
