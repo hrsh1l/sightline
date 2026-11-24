@@ -6,6 +6,7 @@ import { Controls } from './Controls.js';
 import { ErrorBanner } from './ErrorBanner.js';
 import { EvidencePanel } from './EvidencePanel.js';
 import { FindPanel } from './FindPanel.js';
+import { GuidePanel } from './GuidePanel.js';
 import { BUSY_TEXT } from './labels.js';
 import { StatusBar } from './StatusBar.js';
 import { Transcript } from './Transcript.js';
@@ -62,6 +63,7 @@ export function SessionScreen({
         </div>
         <div className="session__panel">
           <Controls state={state} controller={controller} />
+          <GuidePanel state={state} controller={controller} />
           <FindPanel state={state} controller={controller} />
           <AskForm state={state} controller={controller} />
         </div>
