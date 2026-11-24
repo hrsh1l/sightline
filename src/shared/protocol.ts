@@ -46,7 +46,8 @@ export const LIMITS = {
   /** Small frames used ONLY for object detection / find tracking; never forwarded to Gemini Live. */
   detectFrameMaxDim: 640,
   detectFrameJpegQuality: 0.6,
-  detectFrameMinIntervalMs: 250,
+  // Measured 2026-11-24 (dev Mac, YOLO26n, 640 px real photos): inference p50 18 ms / p95 24 ms, HTTP round trip p50 21 ms.
+  detectFrameMinIntervalMs: 200,
   /** Gemini-based locate (find mode for non-COCO items) runs at most this often. */
   locateMinIntervalMs: 1_200,
   /** Find mode stops automatically after this long. */
@@ -71,7 +72,7 @@ export const LIMITS = {
   snapshotRequestTimeoutMs: 8_000,
   /** Detection results older than this are cleared from overlays. */
   detectionTtlMs: 1_500,
-  detectionMinIntervalMs: 250,
+  detectionMinIntervalMs: 200,
   maxDetections: 50,
   maxTranscriptEntries: 200,
   maxClientReconnectAttempts: 5,
