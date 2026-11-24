@@ -176,5 +176,9 @@ export function createAudioPlayer(opts: AudioPlayerOptions = {}): AudioPlayer & 
     get scheduledSources() {
       return sources.size;
     },
+    /** The single output AudioContext; SpatialCues attaches to it (createSpatialCues({ getContext })). */
+    get context() {
+      return ctx;
+    },
   };
 }
