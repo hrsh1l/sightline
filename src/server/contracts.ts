@@ -7,6 +7,7 @@
  *   src/server/vision/**, src/shared/dates.ts, services/detector/**   vision agent
  */
 import type { FramePayload, LabelEvidence, NormalizedBox, ServerDetections, ServerMessage } from '../shared/protocol.js';
+import type { GuideExtraction } from '../shared/guide.js';
 import type { AppConfig } from './config.js';
 
 export type Clock = () => Date;
@@ -45,6 +46,13 @@ export interface VisionService {
    * Gemini box detection for a free-text query ("salt", "the label text"). Boxes are normalised 0..1 (converted
    * from Gemini's box_2d [ymin, xmin, ymax, xmax] in 0..1000). Empty array = not visible. Never fabricated.
    */
+  /**
+   * Instruction companion: assess whether the requested instructions are readable in this FRESH frame and extract them
+   * into ordered, source-grounded steps per section (alternative methods kept separate). Must report an
+   * evidence-based issue + ONE adjustment when inadequate, never invented glare/blur. Never fabricated; throws
+   * VisionError on provider failure. The server post-checks numbers/units in `spoken` against `sourceText`.
+   */
+  extractGuide(input: { frame: FramePayload; goal: string; now: Date; signal?: AbortSignal | undefined }): Promise<GuideExtraction>;
   locate(input: { frame: FramePayload; query: string; signal?: AbortSignal | undefined }): Promise<{
     boxes: { label: string; box: NormalizedBox; score: number }[];
     model: string;

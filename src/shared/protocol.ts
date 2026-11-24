@@ -13,6 +13,7 @@
  *    requestId is a client- or server-generated opaque string (<= 64 chars).
  */
 import { z } from 'zod';
+import { GUIDE_LIMITS, GuideAction, GuideSnapshot } from './guide.js';
 
 export const PROTOCOL_VERSION = 1 as const;
 export const WS_PATH = '/ws' as const;
@@ -124,7 +125,7 @@ export type FramePayload = z.infer<typeof FramePayload>;
 export const SessionMode = z.enum(['live', 'snapshot']);
 export type SessionMode = z.infer<typeof SessionMode>;
 
-export const InspectPurpose = z.enum(['read_label', 'look_again', 'locate']);
+export const InspectPurpose = z.enum(['read_label', 'look_again', 'locate', 'guide']);
 export type InspectPurpose = z.infer<typeof InspectPurpose>;
 
 // ---------------------------------------------------------------------------
@@ -251,6 +252,8 @@ export const ClientHello = z.object({
   clientTime: z.number().int().positive(),
   /** Set when reconnecting after a network loss; server may resume the provider session. */
   resume: z.boolean().optional(),
+  /** Opaque key from a previous `ready` on this open page: lets the server re-attach app state (guide progress). */
+  resumeKey: z.string().min(16).max(64).regex(/^[A-Za-z0-9_-]+$/).optional(),
 });
 
 export const ClientAudio = z.object({
@@ -287,6 +290,31 @@ export const ClientFindStop = z.object({ type: z.literal('find.stop') });
 
 /** Choose one candidate in needs_selection (accessible control). Voice selection uses the select_target tool. */
 export const ClientFindSelect = z.object({ type: z.literal('find.select'), candidateId: z.number().int().nonnegative() });
+
+/**
+ * Instruction companion: inspect a FRESH capture for the guide goal ("Check this view", or start). The server
+ * assesses readability, gives one evidence-based adjustment, or extracts steps. Throttled server-side.
+ */
+export const ClientGuideInspect = z.object({
+  type: z.literal('guide.inspect'),
+  requestId: RequestId,
+  /** e.g. "cooking instructions", "storage instructions". Omitted = keep the remembered goal. */
+  goal: z.string().trim().min(1).max(GUIDE_LIMITS.maxGoalChars).optional(),
+  frame: FramePayload,
+});
+
+/** Accessible-control guide mutation. requestId doubles as an idempotency key. Bound to guideId + revision (+ stepId). */
+export const ClientGuideAction = z.object({
+  type: z.literal('guide.action'),
+  requestId: RequestId,
+  action: GuideAction,
+  guideId: z.string().max(40).nullable(),
+  revision: z.number().int().nonnegative(),
+  /** The step the user is acting on (required for confirm; recommended for next/previous). */
+  stepId: z.string().max(60).optional(),
+  /** For choose_section. */
+  sectionId: z.string().max(40).optional(),
+});
 
 /** Explicit UI controls that do not rely on the model choosing a tool. */
 export const ClientAction = z.object({
@@ -329,6 +357,8 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ClientFind,
   ClientFindStop,
   ClientFindSelect,
+  ClientGuideInspect,
+  ClientGuideAction,
   ClientText,
   ClientAction,
   ClientSnapshotResult,
@@ -375,6 +405,10 @@ export const ServerReady = z.object({
   maxSessionMs: z.number().int().positive(),
   /** IANA timezone used for date comparisons on packaging (e.g. Europe/London). */
   timeZone: z.string().max(64).optional(),
+  /** Key to send back in hello.resumeKey after a reconnect (memory-only on both sides). */
+  resumeKey: z.string().max(64).optional(),
+  /** True when a guide from before the reconnect was re-attached. */
+  guideRestored: z.boolean().optional(),
 });
 
 export const ServerStatus = z.object({
@@ -429,7 +463,23 @@ export const ServerSnapshotRequest = z.object({
 export const ServerTool = z.object({
   type: z.literal('tool'),
   callId: z.string().max(128),
-  name: z.enum(['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding']),
+  name: z.enum([
+    'read_label',
+    'look_again',
+    'find_object',
+    'select_target',
+    'stop_finding',
+    'start_guide',
+    'inspect_current_view',
+    'choose_section',
+    'navigate_step',
+    'confirm_step',
+    'undo_completion',
+    'pause_guide',
+    'resume_guide',
+    'get_guide_status',
+    'stop_guide',
+  ]),
   state: z.enum(['started', 'completed', 'cancelled', 'failed']),
 });
 
@@ -548,6 +598,17 @@ export const ServerNotice = z.object({
   message: z.string().max(300),
 });
 
+/** Authoritative guide state after every change (UI renders it; client ignores lower versions). */
+export const ServerGuide = z.object({
+  type: z.literal('guide'),
+  guide: GuideSnapshot,
+  /** Echo of the client guide.action / guide.inspect requestId this snapshot answers, if any. */
+  requestId: RequestId.nullable(),
+  /** Result of that request: ok, or why it was ignored (stale_revision, wrong_step, duplicate, invalid, throttled...). */
+  result: z.object({ ok: z.boolean(), code: z.string().max(40).nullable() }).nullable(),
+});
+export type ServerGuide = z.infer<typeof ServerGuide>;
+
 export const ServerMessage = z.discriminatedUnion('type', [
   ServerReady,
   ServerStatus,
@@ -560,6 +621,7 @@ export const ServerMessage = z.discriminatedUnion('type', [
   ServerAnswer,
   ServerDetections,
   ServerFind,
+  ServerGuide,
   ServerError,
   ServerNotice,
 ]);

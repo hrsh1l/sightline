@@ -20,6 +20,7 @@ import type {
   ServerDetections,
   SessionMode,
 } from '../shared/protocol.js';
+import type { GuideAction, GuideSnapshot } from '../shared/guide.js';
 
 export type Unsubscribe = () => void;
 export type Listener = () => void;
@@ -273,7 +274,7 @@ export interface Announcement {
   politeness: 'polite' | 'assertive';
 }
 
-export type BusyKind = 'connecting' | 'reading_label' | 'looking' | 'answering' | 'finding';
+export type BusyKind = 'connecting' | 'reading_label' | 'looking' | 'answering' | 'finding' | 'checking_view';
 
 export interface FindStatus {
   query: string;
@@ -372,6 +373,10 @@ export interface AssistantState {
   /** Active find mode, or null. */
   find: FindStatus | null;
   calibration: CalibrationState;
+  /** Authoritative instruction-guide state from the server (IDLE_GUIDE when none). */
+  guide: GuideSnapshot;
+  /** True after a reconnect where the server could not restore the guide (e.g. page reload): say so honestly. */
+  guideLost: boolean;
   error: AppError | null;
   announcement: Announcement | null;
   settings: AssistantSettings;
@@ -397,6 +402,13 @@ export interface AssistantController extends Store<AssistantState> {
   selectTarget(candidateId: number): void;
   setTorch(on: boolean): Promise<void>;
   /** User-initiated stereo check: left tone, right tone, centre tone, then confirm. Call from a tap. */
+  /**
+   * Instruction companion: capture a FRESH high-res still and ask the server to check this view / extract the
+   * instructions for `goal` (omitted = keep the remembered goal). Call from a tap ("Check this view") or typed fallback.
+   */
+  guideInspect(goal?: string): Promise<void>;
+  /** Guide controls (Next, Previous, Repeat, Explain, Done, Undo, Pause, Resume, Status, Stop, choose section). */
+  guideAction(action: GuideAction, opts?: { sectionId?: string }): void;
   startCalibration(): Promise<void>;
   answerCalibration(heardSeparation: boolean): void;
   cancelCalibration(): void;
