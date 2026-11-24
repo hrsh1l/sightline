@@ -52,6 +52,21 @@
  *    control is held. Why: on Android, an open Bluetooth headset microphone usually switches the earbuds from
  *    stereo media audio (A2DP / LE Audio media) to mono call audio (HFP / SCO), which would collapse the beacon to
  *    mono. Releasing the mic gives the stereo beacon its best chance.
+ *
+ * Instruction companion (guide):
+ *  - The SERVER owns guide progress. state.guide is the latest ServerGuide snapshot, applied only when newer
+ *    (higher version, newer revision or a different guideId). Reading a step never marks it complete; only the
+ *    user's explicit Done (guide.action 'confirm' bound to guideId + revision + the current step id) does.
+ *  - guideInspect() captures a FRESH detail still (like Read label) and sends guide.inspect; busy 'checking_view'
+ *    until a ServerGuide answers it (or error / GUIDE_INSPECT_TIMEOUT_MS). snapshot.request purpose 'guide' (voice
+ *    "how about now?") uses the same still path.
+ *  - Guide actions are never queued offline: while not connected they are refused with "Not connected". Pause and
+ *    Stop silence assistant speech locally first.
+ *  - resumeKey from `ready` is kept in memory only (never storage) and sent in hello on reconnect / mode change. If
+ *    a guide was active and the next `ready` does not report guideRestored, the guide is cleared and guideLost set
+ *    (honest message). After a page reload there is no key, so nothing is restored.
+ *  - Snapshot mode: the app speaks guide changes with local TTS (one engine at a time, never over Gemini audio).
+ *    Live mode: the model speaks; the client only announces short status changes (confirmed, paused...) politely.
  */
 import {
   LIMITS,
@@ -90,6 +105,17 @@ import type {
   Unsubscribe,
 } from '../contracts.js';
 import { base64ToBytes, bytesToBase64, rmsOfPcm16Base64 } from '../audio/pcm.js';
+import { GUIDE_LIMITS, IDLE_GUIDE, type GuideAction } from '../../shared/guide.js';
+import {
+  GUIDE_LOST_TEXT,
+  GUIDE_NOT_CONNECTED_TEXT,
+  currentStep,
+  guideAnnouncement,
+  guideRejectText,
+  guideSpeech,
+  isNewerGuide,
+  type GuideCause,
+} from './guideSpeech.js';
 import { boxArea, boxCenter, cocoMatch } from '../../shared/find.js';
 import type { SessionSocketLike } from './SessionSocket.js';
 
@@ -209,6 +235,24 @@ export const SPEECH_RMS_THRESHOLD = 0.02;
 /** Do not send ambient frames when this much data is already queued on the socket. */
 export const MAX_BUFFERED_FOR_FRAMES = 256 * 1024;
 export const LOOK_AGAIN_MAX_DIM = 1_024;
+/** "Check this view" waits this long for the server's guide answer (vision extraction can be slow). */
+export const GUIDE_INSPECT_TIMEOUT_MS = 35_000;
+/** Guide tools that capture and inspect a fresh view (busy 'checking_view' while they run). */
+const GUIDE_INSPECT_TOOLS: ReadonlySet<string> = new Set(['start_guide', 'inspect_current_view']);
+const GUIDE_TOOLS: ReadonlySet<string> = new Set([
+  'start_guide',
+  'inspect_current_view',
+  'choose_section',
+  'navigate_step',
+  'confirm_step',
+  'undo_completion',
+  'pause_guide',
+  'resume_guide',
+  'get_guide_status',
+  'stop_guide',
+]);
+/** Actions that carry the current step id (the step the user is acting on). */
+const STEP_BOUND_ACTIONS: ReadonlySet<GuideAction> = new Set<GuideAction>(['confirm', 'next', 'previous']);
 
 const EMPTY_METRICS: Metrics = {
   frameAgeAtQuestionMs: null,
@@ -287,6 +331,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     detections: null,
     find: null,
     calibration: IDLE_CALIBRATION,
+    guide: IDLE_GUIDE,
+    guideLost: false,
     error: null,
     announcement: null,
     settings: sanitizeSettings({ ...DEFAULT_SETTINGS, ...deps.initialSettings }),
@@ -390,6 +436,15 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   let pendingQuestion: { at: number; frameAgeMs: number | null } | null = null;
   let response: ResponseMetrics | null = null;
   const sentFrames: { sentAt: number; capturedAt: number }[] = [];
+  // Instruction companion
+  /** From the latest `ready`; memory only (never localStorage/sessionStorage). */
+  let resumeKey: string | null = null;
+  /** requestId of the guide.inspect waiting for its answer. */
+  let guideInspectReq: string | null = null;
+  /** guide.action requests sent and not yet answered (requestId -> action). */
+  const guideActionReqs = new Map<string, GuideAction>();
+  /** Snapshot-mode guide speech waiting for Gemini/other audio to finish. */
+  let pendingGuideSpeech: string | null = null;
 
   const isActiveEpoch = (ep: number) => ep === epoch && active;
   const clientSettings = () => ({ pushToTalk: state.settings.pushToTalk, detections: state.settings.detections });
@@ -455,7 +510,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     tick(workingCueDelayMs);
   }
 
-  function setBusy(kind: BusyKind, requestId: string | null, fromTool = false) {
+  function setBusy(kind: BusyKind, requestId: string | null, fromTool = false, timeoutMs = busyTimeoutMs) {
     if (busyTimer) clearTimeout(busyTimer);
     if (busyInfo?.kind !== kind) {
       if (kind === 'connecting') stopWorkingCue();
@@ -469,8 +524,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       if (!isActiveEpoch(ep) || !busyInfo) return;
       const k = busyInfo.kind;
       clearBusy();
+      if (k === 'checking_view') guideInspectReq = null;
       if (k !== 'connecting') announce('That is taking too long. Please try again.', 'assertive');
-    }, busyTimeoutMs);
+    }, timeoutMs);
   }
 
   function clearBusy() {
@@ -631,7 +687,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     setState({ player: p });
     refreshSpeaking();
     updateGate();
-    if (!p.playing) pumpGuidance();
+    if (!p.playing) {
+      pumpGuidance();
+      flushPendingGuideSpeech();
+    }
     if (!active || !audioUnlockSettled) return;
     if (p.contextState === 'suspended' && !paused) {
       if (state.error?.action !== 'tap_to_resume') {
@@ -782,6 +841,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     socketGen++;
     ready = false;
     audioStreaming = false;
+    // Unanswered guide requests die with the socket (never replayed); the guide itself is kept for a restore.
+    guideInspectReq = null;
+    guideActionReqs.clear();
+    pendingGuideSpeech = null;
     return s;
   }
 
@@ -802,6 +865,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         settings: clientSettings(),
         clientTime: now(),
         ...(resume ? { resume: true } : {}),
+        ...(resumeKey ? { resumeKey } : {}),
       });
     };
     socketUnsubs = [
@@ -873,6 +937,16 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     });
     if (busyInfo?.kind === 'connecting') clearBusy();
     if (state.error?.code === 'network') setError(null);
+    if (msg.resumeKey) resumeKey = msg.resumeKey;
+    const guideLostNow = state.guide.phase !== 'idle' && !msg.guideRestored;
+    if (guideLostNow) {
+      // The server could not re-attach the guide: never pretend it is still there.
+      setState({ guide: { ...IDLE_GUIDE, goal: state.guide.goal }, guideLost: true });
+    }
+    // Said after the connection status (single announcement slot: the last one wins).
+    const sayGuideLost = () => {
+      if (guideLostNow) announce(GUIDE_LOST_TEXT, 'assertive');
+    };
     // Detection overlays default to on when the server has a detector, unless the user chose otherwise.
     if (msg.features.detections && detectionsChosen === null && !state.settings.detections) {
       setState({ settings: { ...state.settings, detections: true } });
@@ -881,6 +955,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     if (paused) {
       send({ type: 'visibility', state: 'hidden' });
       setConnection('paused');
+      sayGuideLost();
       return;
     }
     if (!sessionStartCuePlayed && target !== 'error') {
@@ -888,6 +963,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       cue('session_start');
     }
     setConnection(target);
+    sayGuideLost();
     if (target === 'live') startSampler();
     updateDetectSampler();
   }
@@ -926,7 +1002,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       case 'start':
         if (local <= cancelledThrough) return;
         currentTurn = local;
-        if (busyInfo && !busyInfo.fromTool && busyInfo.kind !== 'connecting' && busyInfo.kind !== 'finding') clearBusy();
+        if (busyInfo && !busyInfo.fromTool && busyInfo.kind !== 'connecting' && busyInfo.kind !== 'finding' && busyInfo.kind !== 'checking_view') {
+          clearBusy();
+        }
         beginResponse(`turn:${local}`);
         return;
       case 'interrupted':
@@ -961,7 +1039,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     let frame: CapturedFrame | null;
     try {
       frame =
-        msg.purpose === 'read_label'
+        msg.purpose === 'read_label' || msg.purpose === 'guide'
           ? await captureLabelStill()
           : await camera.capture({ maxDim: Math.min(msg.maxDim, LIMITS.snapshotMaxDim), jpegQuality: LIMITS.snapshotJpegQuality });
     } catch {
@@ -1433,8 +1511,84 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     updateDetectSampler();
   }
 
+  // ---------------------------------------------------------------------------
+  // Instruction companion (server-owned guide snapshots)
+  // ---------------------------------------------------------------------------
+
+  /** Snapshot mode only: app speech for guide changes (local TTS). Live mode: the model speaks instead. */
+  const guideSpokenByApp = () =>
+    state.connection === 'snapshot' && state.settings.speakSnapshotAnswers && speech.supported && !paused;
+
+  function flushPendingGuideSpeech() {
+    if (pendingGuideSpeech === null || player.getState().playing) return;
+    const text = pendingGuideSpeech;
+    pendingGuideSpeech = null;
+    if (!active || calibrating) return;
+    speakGuideNow(text);
+  }
+
+  /** One speech engine at a time: drop queued find guidance and replace any TTS in progress. */
+  function speakGuideNow(text: string) {
+    guidanceQueue = [];
+    if (guidanceTimer) clearTimeout(guidanceTimer);
+    guidanceTimer = null;
+    speakGuidance(text); // speak() replaces the current utterance (no overlap)
+  }
+
+  function speakGuide(text: string) {
+    if (calibrating) return;
+    if (player.getState().playing) {
+      pendingGuideSpeech = text; // never over Gemini audio; newest wins
+      return;
+    }
+    pendingGuideSpeech = null;
+    speakGuideNow(text);
+  }
+
+  function onGuide(msg: ServerMessageOf<'guide'>) {
+    const reqId = msg.requestId;
+    let cause: GuideCause = null;
+    if (reqId && reqId === guideInspectReq) cause = 'inspect';
+    else if (reqId && guideActionReqs.has(reqId)) cause = guideActionReqs.get(reqId)!;
+    if (reqId) guideActionReqs.delete(reqId);
+    const rejected = msg.result !== null && !msg.result.ok;
+    const prev = state.guide;
+    const next = msg.guide;
+    const apply = isNewerGuide(prev, next);
+    if (apply) setState({ guide: next, ...(next.phase !== 'idle' ? { guideLost: false } : {}) });
+    // A view check is over once it is answered with a settled phase (or rejected); a tool-started check once
+    // any settled snapshot arrives.
+    const settled = next.phase !== 'acquiring_image' && next.phase !== 'preparing_guide';
+    const mine = reqId !== null && reqId === guideInspectReq;
+    if (mine && (settled || rejected)) guideInspectReq = null;
+    if (busyInfo?.kind === 'checking_view') {
+      const forBusy = mine || (busyInfo.fromTool && reqId === null) || (busyInfo.requestId !== null && busyInfo.requestId === reqId);
+      if (forBusy && (settled || rejected)) clearBusy();
+    }
+    if (rejected) {
+      const text = guideRejectText(msg.result?.code ?? null);
+      if (text) {
+        // Shown in the guide status line (until the next snapshot) and said once, briefly.
+        setState({ guide: { ...state.guide, message: text } });
+        if (guideSpokenByApp()) speakGuide(text);
+        else announce(text);
+      }
+      return;
+    }
+    if (!apply) return;
+    if (guideSpokenByApp()) {
+      const text = guideSpeech(prev, next, cause);
+      if (text) speakGuide(text);
+      return;
+    }
+    const text = guideAnnouncement(prev, next, cause, state.connection === 'live');
+    if (text) announce(text);
+  }
+
   function onServerError(msg: ServerMessageOf<'error'>) {
     if (msg.requestId && msg.requestId === findReqId) endFindLocal();
+    if (msg.requestId && msg.requestId === guideInspectReq) guideInspectReq = null;
+    if (msg.requestId) guideActionReqs.delete(msg.requestId);
     if (busyInfo && ((msg.requestId && busyInfo.requestId === msg.requestId) || (msg.code === 'snapshot_timeout' && busyInfo.fromTool))) {
       clearBusy();
     }
@@ -1488,6 +1642,17 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       case 'tool':
         // Find messages drive busy/cues/prompts for the find tools.
         if (msg.name === 'find_object' || msg.name === 'select_target' || msg.name === 'stop_finding') return;
+        if (GUIDE_TOOLS.has(msg.name)) {
+          // Guide progress arrives as ServerGuide snapshots; only the view check shows a busy state.
+          if (!GUIDE_INSPECT_TOOLS.has(msg.name)) return;
+          if (msg.state === 'started') {
+            setBusy('checking_view', null, true, GUIDE_INSPECT_TIMEOUT_MS);
+            announce('Checking the view');
+          } else if (busyInfo?.fromTool && busyInfo.kind === 'checking_view') {
+            clearBusy();
+          }
+          return;
+        }
         if (msg.state === 'started') {
           const kind: BusyKind = msg.name === 'read_label' ? 'reading_label' : 'looking';
           setBusy(kind, null, true);
@@ -1521,6 +1686,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         return onDetections(msg);
       case 'find':
         return onFind(msg);
+      case 'guide':
+        return onGuide(msg);
       case 'error':
         return onServerError(msg);
       case 'notice':
@@ -1769,7 +1936,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       stopCalibration();
       if (state.calibration.step !== 'idle' && state.calibration.step !== 'done') setState({ calibration: IDLE_CALIBRATION });
       teardown();
-      setState({ connection: 'ended', busy: null, talking: false, detections: null, speaking: false });
+      // The user ended the session: the server drops the guide too, so nothing is left to resume.
+      resumeKey = null;
+      pendingGuideSpeech = null;
+      setState({ connection: 'ended', busy: null, talking: false, detections: null, speaking: false, guide: IDLE_GUIDE, guideLost: false });
       announce('Session ended.');
     },
 
@@ -1821,6 +1991,78 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     },
 
     readLabel: () => explicitCapture('read_label'),
+
+    async guideInspect(goal?: string) {
+      void spatial?.unlock(); // from a tap: earcons need the cue AudioContext
+      if (!isUsable()) {
+        announce(GUIDE_NOT_CONNECTED_TEXT, 'assertive');
+        return;
+      }
+      if (guideInspectReq !== null && busyInfo?.kind === 'checking_view') {
+        announce('Still checking the view.');
+        return;
+      }
+      const g = goal?.trim().slice(0, GUIDE_LIMITS.maxGoalChars);
+      const ep = epoch;
+      setBusy('checking_view', null, false, GUIDE_INSPECT_TIMEOUT_MS);
+      announce('Checking the view. Hold still.');
+      let frame: CapturedFrame | null;
+      try {
+        frame = await captureLabelStill(); // always a FRESH still, never an older ambient frame
+      } catch {
+        frame = null;
+      }
+      if (!isActiveEpoch(ep)) return;
+      if (!frame) {
+        clearBusy();
+        setError({ code: 'camera', message: 'Camera unavailable. Check the camera and try again.', recoverable: true, action: 'retry' });
+        return;
+      }
+      const requestId = `guide-inspect-${++reqCounter}`;
+      if (!send({ type: 'guide.inspect', requestId, ...(g ? { goal: g } : {}), frame })) {
+        clearBusy();
+        announce(GUIDE_NOT_CONNECTED_TEXT, 'assertive');
+        return;
+      }
+      recordFrameSent(frame);
+      guideInspectReq = requestId;
+      setBusy('checking_view', requestId, false, GUIDE_INSPECT_TIMEOUT_MS);
+      if (state.guideLost) setState({ guideLost: false });
+    },
+
+    guideAction(action: GuideAction, opts: { sectionId?: string } = {}) {
+      // Pause / Stop: silence assistant speech locally at once, before anything else.
+      if (action === 'pause' || action === 'stop') {
+        pendingGuideSpeech = null;
+        controller.stopSpeaking();
+      }
+      if (!isUsable() || !socket?.isOpen) {
+        // Never queue a mutation while offline: it could apply to a stale guide later.
+        announce(GUIDE_NOT_CONNECTED_TEXT, 'assertive');
+        return;
+      }
+      const g = state.guide;
+      const stepId = STEP_BOUND_ACTIONS.has(action) ? currentStep(g)?.id : undefined;
+      if (action === 'confirm' && !stepId) return; // nothing to confirm
+      if (action === 'choose_section' && !opts.sectionId) return;
+      const requestId = `guide-${action.replace(/_/g, '-')}-${++reqCounter}`;
+      const ok = send({
+        type: 'guide.action',
+        requestId,
+        action,
+        guideId: g.guideId,
+        revision: g.revision,
+        ...(stepId ? { stepId } : {}),
+        ...(action === 'choose_section' && opts.sectionId ? { sectionId: opts.sectionId } : {}),
+      });
+      if (!ok) {
+        announce(GUIDE_NOT_CONNECTED_TEXT, 'assertive');
+        return;
+      }
+      guideActionReqs.set(requestId, action);
+      while (guideActionReqs.size > 20) guideActionReqs.delete(guideActionReqs.keys().next().value!);
+      if (action === 'stop' && state.guideLost) setState({ guideLost: false });
+    },
     lookAgain: () => explicitCapture('look_again'),
 
     find(query: string) {

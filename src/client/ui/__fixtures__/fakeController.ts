@@ -8,6 +8,7 @@
 import { vi } from 'vitest';
 import type { AssistantController, AssistantState, FindStatus, Listener } from '../../contracts.js';
 import type { FindCandidate, LabelEvidence, ServerDetections } from '../../../shared/protocol.js';
+import { IDLE_GUIDE, type GuideAction, type GuideSnapshot, type GuideStepState } from '../../../shared/guide.js';
 
 export function makeState(overrides: Partial<AssistantState> = {}): AssistantState {
   return {
@@ -34,6 +35,8 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
     detections: null,
     find: null,
     calibration: { step: 'idle', heardSeparation: null, micActive: false },
+    guide: IDLE_GUIDE,
+    guideLost: false,
     error: null,
     announcement: null,
     settings: {
@@ -159,6 +162,59 @@ export function makeCandidates(positions: Array<FindCandidate['position']> = ['l
   }));
 }
 
+/** FIXTURE: one guide step (verbatim text invented for tests; no AI). */
+export function makeStep(n: number, overrides: Partial<GuideStepState> = {}): GuideStepState {
+  return {
+    id: `microwave-s${n}`,
+    n,
+    index: n - 1,
+    sourceText: `FIXTURE source text for step ${n}.`,
+    spoken: `Fixture spoken step ${n}.`,
+    quantities: [],
+    warnings: [],
+    presented: false,
+    confirmed: false,
+    ...overrides,
+  };
+}
+
+/**
+ * FIXTURE guide snapshot (invented text, no AI): a 4-step "Microwave" method guiding at step 2, with step 1
+ * presented + confirmed and step 2 presented (not confirmed). Override anything.
+ */
+export function makeGuide(overrides: Partial<GuideSnapshot> = {}): GuideSnapshot {
+  const steps = [
+    makeStep(1, { sourceText: 'Pierce film lid several times.', spoken: 'Pierce the film lid several times.', presented: true, confirmed: true }),
+    makeStep(2, {
+      sourceText: 'Heat on full power (800W) for 3 minutes.',
+      spoken: 'Heat on full power, 800W, for 3 minutes.',
+      quantities: [
+        { text: '800W', kind: 'power' },
+        { text: '3 minutes', kind: 'duration' },
+      ],
+      warnings: ['Caution: contents will be hot.'],
+      presented: true,
+    }),
+    makeStep(3, { sourceText: 'Stir and re-cover.', spoken: 'Stir, then re-cover.' }),
+    makeStep(4, { sourceText: 'Stand for 1 minute before serving.', spoken: 'Let it stand for 1 minute before serving.' }),
+  ];
+  return {
+    ...IDLE_GUIDE,
+    phase: 'guiding',
+    goal: 'cooking instructions',
+    guideId: 'g-fixture',
+    revision: 1,
+    title: 'Tomato Soup',
+    section: { id: 'microwave', title: 'MICROWAVE (800W)', kind: 'method' },
+    steps,
+    currentIndex: 1,
+    sourceFrames: [{ frameId: 7, capturedAt: Date.UTC(2026, 10, 24, 12, 30, 5) }],
+    version: 5,
+    confirmations: ['microwave-s1'],
+    ...overrides,
+  };
+}
+
 export class FakeController implements AssistantController {
   private state: AssistantState;
   private listeners = new Set<Listener>();
@@ -195,6 +251,8 @@ export class FakeController implements AssistantController {
   answerCalibration = vi.fn((_heardSeparation: boolean): void => {});
   cancelCalibration = vi.fn((): void => {});
   setTorch = vi.fn(async (_on: boolean): Promise<void> => {});
+  guideInspect = vi.fn(async (_goal?: string): Promise<void> => {});
+  guideAction = vi.fn((_action: GuideAction, _opts?: { sectionId?: string }): void => {});
   lookAgain = vi.fn(async (): Promise<void> => {});
   repeat = vi.fn((): void => {});
   sendText = vi.fn(async (_text: string): Promise<void> => {});

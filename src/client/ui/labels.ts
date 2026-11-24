@@ -97,6 +97,7 @@ export const BUSY_TEXT: Record<BusyKind, string> = {
   looking: 'Looking again…',
   answering: 'Answering…',
   finding: 'Finding…',
+  checking_view: 'Checking the view…',
 };
 
 export const DETECTION_SOURCE_TEXT: Record<'yolo' | 'gemini', string> = {

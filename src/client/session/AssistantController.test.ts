@@ -28,6 +28,7 @@ import {
   CENTRED_SPEECH_DELAY_MS,
   GUIDANCE_TTS_TAIL_MS,
   GUIDANCE_WAIT_FOR_ASSISTANT_MS,
+  GUIDE_INSPECT_TIMEOUT_MS,
   REAR_CAMERA_PROMPT,
   SPOKEN_DIRECTION_INTERVAL_MS,
   USER_SPEECH_SUPPRESS_MS,
@@ -36,6 +37,9 @@ import {
   type AssistantDeps,
 } from './AssistantController.js';
 import type { SessionSocketLike } from './SessionSocket.js';
+import { IDLE_GUIDE, type GuideSnapshot } from '../../shared/guide.js';
+import { GUIDE_LOST_TEXT } from './guideSpeech.js';
+import { makeGuide } from '../ui/__fixtures__/fakeController.js';
 
 const calls: string[] = [];
 
@@ -1500,5 +1504,365 @@ describe('detection metrics', () => {
     const m = h.controller.getState().metrics;
     expect(m.detectionAgeMs).toBe(60);
     expect(m.detectionRate).toBeCloseTo(5, 0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v4: instruction companion (FIXTURE guide snapshots; the server owns progress)
+// ---------------------------------------------------------------------------
+
+const guideMsg = (guide: GuideSnapshot, requestId: string | null = null, result: ServerMessageOf<'guide'>['result'] = null): ServerMessageOf<'guide'> => ({
+  type: 'guide',
+  guide,
+  requestId,
+  result,
+});
+const RESUME_KEY = 'resume_key_ABCDEFGHIJ-0123';
+const sentOf = <T extends ClientMessage['type']>(h: { socket: ReturnType<typeof fakeSocket> }, type: T) =>
+  h.socket.sent.filter((m): m is Extract<ClientMessage, { type: T }> => m.type === type);
+
+describe('guide: snapshots', () => {
+  it('starts idle and applies only newer snapshots (version, revision, guideId)', async () => {
+    const h = await started();
+    expect(h.controller.getState().guide).toEqual(IDLE_GUIDE);
+    expect(h.controller.getState().guideLost).toBe(false);
+    const v5 = makeGuide({ version: 5 });
+    h.socket.receive(guideMsg(v5));
+    expect(h.controller.getState().guide).toBe(v5);
+    h.socket.receive(guideMsg(makeGuide({ version: 4, currentIndex: 0 }))); // older: ignored
+    h.socket.receive(guideMsg(makeGuide({ version: 5, currentIndex: 3 }))); // same version: ignored
+    expect(h.controller.getState().guide).toBe(v5);
+    const v6 = makeGuide({ version: 6, currentIndex: 2 });
+    h.socket.receive(guideMsg(v6));
+    expect(h.controller.getState().guide).toBe(v6);
+    h.socket.receive(guideMsg(makeGuide({ version: 9, revision: 0 }))); // older revision of the same guide
+    expect(h.controller.getState().guide).toBe(v6);
+    const rescanned = makeGuide({ version: 2, revision: 2 }); // rescan: newer revision wins
+    h.socket.receive(guideMsg(rescanned));
+    expect(h.controller.getState().guide).toBe(rescanned);
+    const other = makeGuide({ version: 1, guideId: 'g-other', revision: 0 }); // a different guide
+    h.socket.receive(guideMsg(other));
+    expect(h.controller.getState().guide).toBe(other);
+  });
+
+  it('a rejected request shows a short polite reason; stale snapshots never replace newer state', async () => {
+    const h = await started();
+    h.socket.receive(guideMsg(makeGuide({ version: 7 })));
+    h.controller.guideAction('next');
+    const req = sentOf(h, 'guide.action').at(-1)!.requestId;
+    h.socket.receive(guideMsg(makeGuide({ version: 6, currentIndex: 3 }), req, { ok: false, code: 'stale_revision' }));
+    const st = h.controller.getState();
+    expect(st.guide.version).toBe(7);
+    expect(st.guide.currentIndex).toBe(1);
+    expect(st.guide.message).toBe('Ignored: that was for an older view of the instructions.');
+    expect(st.announcement).toMatchObject({ text: 'Ignored: that was for an older view of the instructions.', politeness: 'polite' });
+    // duplicate: silent
+    const before = h.controller.getState().announcement;
+    h.socket.receive(guideMsg(makeGuide({ version: 7 }), 'guide-next-99', { ok: false, code: 'duplicate' }));
+    expect(h.controller.getState().announcement).toBe(before);
+  });
+});
+
+describe('guide: Check this view', () => {
+  it('captures a FRESH detail still each time with a new requestId; busy until the answer', async () => {
+    const h = await startedV2();
+    await h.controller.guideInspect('storage instructions');
+    expect(h.camera.captureStill).toHaveBeenCalledTimes(1);
+    expect(h.camera.captureStill).toHaveBeenLastCalledWith({ maxDim: LIMITS.detailMaxDim, jpegQuality: LIMITS.detailJpegQuality, bestOf: LIMITS.detailBestOf });
+    expect(h.spatial.earcons()).toContain('capture');
+    const first = sentOf(h, 'guide.inspect').at(-1)!;
+    expect(first).toMatchObject({ type: 'guide.inspect', goal: 'storage instructions' });
+    expect(h.controller.getState().busy?.kind).toBe('checking_view');
+    // A second tap while checking does not send another capture.
+    await h.controller.guideInspect();
+    expect(sentOf(h, 'guide.inspect')).toHaveLength(1);
+    // An intermediate acquiring snapshot keeps busy; the settled answer clears it.
+    h.socket.receive(guideMsg({ ...IDLE_GUIDE, phase: 'acquiring_image', goal: 'storage instructions', version: 1 }, first.requestId, { ok: true, code: null }));
+    expect(h.controller.getState().busy?.kind).toBe('checking_view');
+    h.socket.receive(
+      guideMsg(
+        { ...IDLE_GUIDE, phase: 'needs_better_view', goal: 'storage instructions', adjustment: 'Move the phone slightly back.', version: 2 },
+        first.requestId,
+        { ok: true, code: null },
+      ),
+    );
+    expect(h.controller.getState().busy).toBeNull();
+    // "How about now?" with no goal: a new still and a new requestId, goal omitted (server keeps it).
+    await h.controller.guideInspect();
+    expect(h.camera.captureStill).toHaveBeenCalledTimes(2);
+    const second = sentOf(h, 'guide.inspect').at(-1)!;
+    expect(second.requestId).not.toBe(first.requestId);
+    expect(second).not.toHaveProperty('goal');
+    expect(second.frame.frameId).not.toBe(first.frame.frameId);
+  });
+
+  it('falls back to capture() and times out after ~35 s', async () => {
+    const h = await startedV2();
+    h.camera.setStill(() => Promise.resolve(null));
+    await h.controller.guideInspect();
+    expect(h.camera.capture).toHaveBeenLastCalledWith({ maxDim: LIMITS.snapshotMaxDim, jpegQuality: LIMITS.snapshotJpegQuality });
+    expect(h.controller.getState().busy?.kind).toBe('checking_view');
+    vi.advanceTimersByTime(GUIDE_INSPECT_TIMEOUT_MS - 1);
+    expect(h.controller.getState().busy?.kind).toBe('checking_view');
+    vi.advanceTimersByTime(1);
+    expect(h.controller.getState().busy).toBeNull();
+    // A new check is possible again.
+    await h.controller.guideInspect();
+    expect(sentOf(h, 'guide.inspect')).toHaveLength(2);
+  });
+
+  it('a server error for the request clears busy', async () => {
+    const h = await started();
+    await h.controller.guideInspect();
+    const req = sentOf(h, 'guide.inspect').at(-1)!.requestId;
+    h.socket.receive({ type: 'error', code: 'provider_error', message: 'Could not read the photo.', recoverable: true, requestId: req });
+    expect(h.controller.getState().busy).toBeNull();
+  });
+
+  it("snapshot.request purpose 'guide' uses the fresh detail still", async () => {
+    const h = await startedV2();
+    h.socket.receive({ type: 'snapshot.request', requestId: 'snap-g', purpose: 'guide', maxDim: 4096 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.camera.captureStill).toHaveBeenCalledTimes(1);
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'snapshot.result', requestId: 'snap-g' });
+  });
+
+  it('voice inspect tools show checking_view until they complete', async () => {
+    const h = await started();
+    h.socket.receive({ type: 'tool', callId: 'c1', name: 'inspect_current_view', state: 'started' });
+    expect(h.controller.getState().busy?.kind).toBe('checking_view');
+    h.socket.receive({ type: 'tool', callId: 'c1', name: 'inspect_current_view', state: 'completed' });
+    expect(h.controller.getState().busy).toBeNull();
+    h.socket.receive({ type: 'tool', callId: 'c2', name: 'navigate_step', state: 'started' });
+    expect(h.controller.getState().busy).toBeNull();
+  });
+
+  it('refuses while not connected', async () => {
+    const h = await started();
+    h.socket.serverClose();
+    await h.controller.guideInspect();
+    expect(h.camera.captureStill).not.toHaveBeenCalled();
+    expect(h.controller.getState().announcement?.text).toMatch(/^Not connected/);
+  });
+});
+
+describe('guide: actions', () => {
+  it('bind every action to the current guideId, revision and step; fresh requestId each time', async () => {
+    const h = await started();
+    h.socket.receive(guideMsg(makeGuide({ guideId: 'g1', revision: 3, version: 10, currentIndex: 1 })));
+    h.controller.guideAction('confirm');
+    h.controller.guideAction('next');
+    h.controller.guideAction('previous');
+    h.controller.guideAction('undo');
+    h.controller.guideAction('repeat');
+    h.controller.guideAction('explain');
+    h.controller.guideAction('status');
+    const sent = sentOf(h, 'guide.action');
+    expect(sent.map((m) => m.action)).toEqual(['confirm', 'next', 'previous', 'undo', 'repeat', 'explain', 'status']);
+    for (const m of sent) expect(m).toMatchObject({ guideId: 'g1', revision: 3 });
+    expect(sent[0]).toMatchObject({ stepId: 'microwave-s2' });
+    expect(sent[1]).toMatchObject({ stepId: 'microwave-s2' });
+    expect(sent[2]).toMatchObject({ stepId: 'microwave-s2' });
+    expect(sent[3]).not.toHaveProperty('stepId');
+    expect(new Set(sent.map((m) => m.requestId)).size).toBe(sent.length);
+    // The step follows the newest snapshot.
+    h.socket.receive(guideMsg(makeGuide({ guideId: 'g1', revision: 3, version: 11, currentIndex: 2 })));
+    h.controller.guideAction('confirm');
+    expect(sentOf(h, 'guide.action').at(-1)).toMatchObject({ action: 'confirm', stepId: 'microwave-s3', revision: 3 });
+  });
+
+  it('choose_section carries the section id; confirm without a current step sends nothing', async () => {
+    const h = await started();
+    h.socket.receive(
+      guideMsg({
+        ...IDLE_GUIDE,
+        phase: 'choosing_section',
+        guideId: 'g2',
+        revision: 1,
+        version: 3,
+        sectionChoices: [
+          { id: 'microwave', title: 'Microwave', stepCount: 4, complete: true },
+          { id: 'oven', title: 'Oven', stepCount: 6, complete: false },
+        ],
+      }),
+    );
+    h.controller.guideAction('confirm');
+    expect(sentOf(h, 'guide.action')).toHaveLength(0);
+    h.controller.guideAction('choose_section', { sectionId: 'oven' });
+    expect(sentOf(h, 'guide.action').at(-1)).toMatchObject({ action: 'choose_section', sectionId: 'oven', guideId: 'g2', revision: 1 });
+  });
+
+  it('never sends or queues actions while disconnected', async () => {
+    const h = await started();
+    h.socket.receive(guideMsg(makeGuide()));
+    const first = h.socket;
+    first.serverClose();
+    h.controller.guideAction('confirm');
+    h.controller.guideAction('next');
+    expect(first.sent.filter((m) => m.type === 'guide.action')).toHaveLength(0);
+    expect(h.controller.getState().announcement).toMatchObject({ politeness: 'assertive' });
+    expect(h.controller.getState().announcement?.text).toMatch(/^Not connected/);
+    vi.advanceTimersByTime(100);
+    h.socket.open();
+    h.socket.receive({ ...readyMsg(), guideRestored: true });
+    expect(h.socket.types()).toEqual(['hello']); // nothing replayed
+  });
+
+  it('pause and stop silence assistant speech locally before sending', async () => {
+    const h = await started();
+    h.socket.receive(guideMsg(makeGuide()));
+    h.socket.receive({ type: 'turn', turnId: 1, event: 'start', at: 0 });
+    h.socket.receive({ type: 'audio', turnId: 1, seq: 0, data: 'AAAA' });
+    expect(h.player.getState().playing).toBe(true);
+    h.controller.guideAction('pause');
+    expect(h.player.getState().playing).toBe(false);
+    expect(h.speech.cancel).toHaveBeenCalled();
+    const flushOrder = h.player.flush.mock.invocationCallOrder.at(-1)!;
+    const sendCalls = h.socket.send.mock.calls.map((c, i) => ({ m: c[0], order: h.socket.send.mock.invocationCallOrder[i]! }));
+    const pauseSend = sendCalls.find((c) => c.m.type === 'guide.action')!;
+    expect(pauseSend.m).toMatchObject({ action: 'pause' });
+    expect(flushOrder).toBeLessThan(pauseSend.order);
+    // Late audio of the stopped turn is rejected.
+    h.socket.receive({ type: 'audio', turnId: 1, seq: 1, data: 'LATE' });
+    expect(h.player.enqueued).toHaveLength(1);
+    const cancels = h.speech.cancel.mock.calls.length;
+    h.controller.guideAction('stop');
+    expect(h.speech.cancel.mock.calls.length).toBeGreaterThan(cancels);
+    expect(sentOf(h, 'guide.action').at(-1)).toMatchObject({ action: 'stop' });
+  });
+});
+
+describe('guide: resume key', () => {
+  it('kept in memory only, sent in hello on reconnect; a guide that is not restored is reported lost', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    const h = setup();
+    const p = h.controller.start();
+    h.socket.open();
+    expect(h.socket.sent[0]).not.toHaveProperty('resumeKey'); // fresh page: nothing to restore
+    h.socket.receive({ ...readyMsg(), resumeKey: RESUME_KEY });
+    await p;
+    h.socket.receive(guideMsg(makeGuide()));
+    h.socket.serverClose();
+    vi.advanceTimersByTime(100);
+    h.socket.open();
+    expect(h.socket.sent[0]).toMatchObject({ type: 'hello', resume: true, resumeKey: RESUME_KEY });
+    h.socket.receive({ ...readyMsg(), resumeKey: RESUME_KEY });
+    const st = h.controller.getState();
+    expect(st.guideLost).toBe(true);
+    expect(st.guide.phase).toBe('idle');
+    expect(st.announcement).toMatchObject({ text: GUIDE_LOST_TEXT, politeness: 'assertive' });
+    expect(setItem).not.toHaveBeenCalled();
+    // Starting again clears the lost banner.
+    await h.controller.guideInspect('cooking instructions');
+    expect(h.controller.getState().guideLost).toBe(false);
+  });
+
+  it('a restored guide stays; the server snapshot then continues it', async () => {
+    const h = setup();
+    const p = h.controller.start();
+    h.socket.open();
+    h.socket.receive({ ...readyMsg(), resumeKey: RESUME_KEY });
+    await p;
+    const g = makeGuide({ version: 5 });
+    h.socket.receive(guideMsg(g));
+    h.socket.serverClose();
+    vi.advanceTimersByTime(100);
+    h.socket.open();
+    h.socket.receive({ ...readyMsg(), resumeKey: RESUME_KEY, guideRestored: true });
+    expect(h.controller.getState()).toMatchObject({ guideLost: false, guide: g });
+    h.socket.receive(guideMsg(makeGuide({ version: 6, currentIndex: 2 })));
+    expect(h.controller.getState().guide.currentIndex).toBe(2);
+  });
+
+  it('no active guide: nothing is reported lost; End forgets the key', async () => {
+    const h = setup();
+    const p = h.controller.start();
+    h.socket.open();
+    h.socket.receive({ ...readyMsg(), resumeKey: RESUME_KEY });
+    await p;
+    h.socket.serverClose();
+    vi.advanceTimersByTime(100);
+    h.socket.open();
+    h.socket.receive(readyMsg());
+    expect(h.controller.getState().guideLost).toBe(false);
+    h.controller.end();
+    const p2 = h.controller.start();
+    h.socket.open();
+    expect(h.socket.sent[0]).not.toHaveProperty('resumeKey');
+    h.socket.receive(readyMsg());
+    await p2;
+  });
+});
+
+describe('guide: speech', () => {
+  it('snapshot mode speaks a step change once with local TTS', async () => {
+    const h = await started('snapshot');
+    h.socket.receive(guideMsg(makeGuide({ version: 1, currentIndex: 0 })));
+    expect(h.speech.spoken()).toEqual(['Step 1 of 4: Pierce the film lid several times.']);
+    h.speech.finish();
+    // Same step, newer version (e.g. presented flag): not spoken again.
+    h.socket.receive(guideMsg(makeGuide({ version: 2, currentIndex: 0 })));
+    expect(h.speech.spoken()).toHaveLength(1);
+    h.controller.guideAction('next');
+    const req = sentOf(h, 'guide.action').at(-1)!.requestId;
+    h.socket.receive(guideMsg(makeGuide({ version: 3, currentIndex: 1 }), req, { ok: true, code: null }));
+    expect(h.speech.spoken().at(-1)).toBe('Step 2 of 4: Heat on full power, 800W, for 3 minutes. Warning: Caution: contents will be hot.');
+    h.speech.finish();
+    // Repeat re-speaks the same step (the user asked).
+    h.controller.guideAction('repeat');
+    const rep = sentOf(h, 'guide.action').at(-1)!.requestId;
+    h.socket.receive(guideMsg(makeGuide({ version: 4, currentIndex: 1 }), rep, { ok: true, code: null }));
+    expect(h.speech.spoken()).toHaveLength(3);
+    h.speech.finish();
+    // A confirmation without a server message is said briefly.
+    h.controller.guideAction('confirm');
+    const conf = sentOf(h, 'guide.action').at(-1)!.requestId;
+    const after = makeGuide({ version: 5, currentIndex: 1, confirmations: ['microwave-s1', 'microwave-s2'] });
+    h.socket.receive(guideMsg(after, conf, { ok: true, code: null }));
+    expect(h.speech.spoken().at(-1)).toBe('Step 2 confirmed done.');
+  });
+
+  it('snapshot mode speaks the adjustment and the section question', async () => {
+    const h = await started('snapshot');
+    h.socket.receive(guideMsg({ ...IDLE_GUIDE, phase: 'needs_better_view', adjustment: 'Move the phone slightly back.', version: 1 }));
+    expect(h.speech.spoken().at(-1)).toBe('Move the phone slightly back.');
+    h.speech.finish();
+    h.socket.receive(
+      guideMsg({
+        ...IDLE_GUIDE,
+        phase: 'choosing_section',
+        guideId: 'g',
+        version: 2,
+        sectionChoices: [
+          { id: 'm', title: 'Microwave', stepCount: 4, complete: true },
+          { id: 'o', title: 'Oven', stepCount: 6, complete: true },
+        ],
+      }),
+    );
+    expect(h.speech.spoken().at(-1)).toBe('I can see 2 different methods: Microwave, 4 steps; Oven, 6 steps. Which one?');
+  });
+
+  it('snapshot mode waits for other assistant audio, never two engines at once', async () => {
+    const h = await started('snapshot');
+    h.player.setState({ playing: true, turnId: 1 });
+    h.socket.receive(guideMsg(makeGuide({ version: 1, currentIndex: 0 })));
+    expect(h.speech.speak).not.toHaveBeenCalled();
+    h.player.setState({ playing: false, turnId: null });
+    expect(h.speech.spoken()).toEqual(['Step 1 of 4: Pierce the film lid several times.']);
+  });
+
+  it('Live mode: the model speaks; the client never uses TTS and only announces short status', async () => {
+    const h = await started('live');
+    h.socket.receive(guideMsg(makeGuide({ version: 1, currentIndex: 0, confirmations: [] })));
+    h.socket.receive(guideMsg(makeGuide({ version: 2, currentIndex: 1 })));
+    expect(h.speech.speak).not.toHaveBeenCalled();
+    expect(h.controller.getState().announcement?.text).toBe('Step 1 confirmed done.');
+    // While the assistant is speaking, polite guide announcements are suppressed.
+    h.socket.receive({ type: 'turn', turnId: 1, event: 'start', at: 0 });
+    h.socket.receive({ type: 'audio', turnId: 1, seq: 0, data: 'AAAA' });
+    const before = h.controller.getState().announcement;
+    h.socket.receive(guideMsg(makeGuide({ version: 3, phase: 'paused' })));
+    expect(h.controller.getState().announcement).toBe(before);
+    expect(h.speech.speak).not.toHaveBeenCalled();
   });
 });
