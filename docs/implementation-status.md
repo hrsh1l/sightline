@@ -72,3 +72,20 @@ Status values: `todo`, `in progress`, `done (verified: …)`, `deferred`, `block
 | 13 | Green boxes, Find panel, torch toggle, sound settings, diagnostics | UI worker | done (RTL tests + Chromium e2e; not yet on S25/TalkBack) |
 | 14 | Integration: main.tsx wiring, live schema bug fix, 429 fallback, test updates | lead | done (649 unit/integration tests, 9/9 e2e, build, secret scan) |
 | 15 | Local YOLO in main tree | lead | done (uv sync, weights downloaded, service answers; user must add DETECTOR_URL to .env) |
+
+## v3 Find mode (directional stereo) — IN PROGRESS (paused 2026-11-24 at usage limit)
+
+| # | Task | Owner | Status |
+|---|---|---|---|
+| 16 | Contracts v3, supported list (`src/shared/findTargets.ts`), 5 FPS detection from measured latency | lead | done |
+| 17 | Real-detector Find e2e harness (`npm run test:e2e:find`, generated videos, cue instrumentation) | lead | written, **not yet run** (needs the two workers below merged) |
+| 18 | Find UI v3 (selector, candidates, stereo check, guidance/mic settings) | UI worker | done + merged (133 UI tests) |
+| 19 | Server tracking/selection/prompts/tools/read-label binding | server worker | in progress — branch `worktree-agent-af462676cea06842f` (WIP commit requested) |
+| 20 | Client stereo beacon, guidance speech, calibration, mic policy | audio worker | in progress — branch `worktree-agent-a5b98ba7db8ad9079` (WIP commit requested) |
+
+Note: `feat/sightline` HEAD does **not typecheck** until 19 and 20 are merged (contracts v3 are ahead of the implementations).
+The last fully green commit is `3df032d` (v2: label reading fix, green boxes, first find mode).
+
+Resume: `git log worktree-agent-af462676cea06842f worktree-agent-a5b98ba7db8ad9079 -3`, merge both, wire
+`createSpatialCues({ getContext: () => player.context })` in `src/client/main.tsx`, then `npm run verify`,
+`npx playwright test`, `npm run detector` + `npm run test:e2e:find`, fix failures, update docs/test-results.md.
