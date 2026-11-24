@@ -92,4 +92,4 @@ Record date, Sightline commit, mic policy, guidance mode, and the diagnostics' d
 | I | Stereo with microphone ACTIVE (calibration with mic on) | Left/right distinct — or note mono and the release-mic result | |
 | J | Original conversation + Read label demo | Unchanged | |
 
-Status: see [test-results.md](test-results.md). Hardware checks A–J have **not** been run by the build environment.
+Status: automated and real-detector browser results are in [test-results.md](test-results.md) (direction, single confirmation, loss, three-bowl selection all pass in desktop Chromium). Hardware checks A–J on the S25 + Buds3 Pro have **not** been run.

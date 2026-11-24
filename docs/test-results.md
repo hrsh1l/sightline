@@ -208,3 +208,38 @@ be read → addressed by the detail-reading work in progress. The formal checkli
 - Push-to-talk in a browser (unit/RTL only); object-detection overlays in a browser (unit only; YOLO service not run).
 - Session duration limit and server heartbeat timeouts (unit tests with fake timers only).
 - TalkBack and real assistive-technology announcements.
+
+
+## v3 Find mode (directional stereo), 2026-11-24
+
+### Automated (unit + integration, FIXTURE providers)
+`npm run verify`: 34 files / **763 tests pass**; typecheck, lint, production build and client secret scan pass.
+`npx playwright test` (FIXTURE Gemini, Chromium fake media): **9/9 pass**.
+Find coverage includes: pan mapping (left/centre/right, portrait/landscape boxes), pulse interval, pan smoothing
+(setTargetAtTime), envelopes, stale-observation silence, centred silence, immediate stop cancelling scheduled pulses,
+repeated start/stop without leaked voices/timers, shared AudioContext; tracker association/ID persistence, binding
+against a bigger/more confident same-class object, loss announced once, reacquisition vs reselect, hysteresis on both
+axes, dwell (single/stale/out-of-order frames cannot confirm), one confirmation per episode, not_seen/tilt prompts and
+throttling, selection by control and by `select_target`, unsupported items, detector failure leaving conversation
+working, latest-frame detection slot, `read_label` subject binding, calibration flow, mic blanking/release policy.
+
+### Real detector in desktop Chromium (`npm run detector` + `npm run test:e2e:find`)
+Real YOLO26n detections on generated fake-camera videos built from a real COCO photo (Ultralytics COCO8
+`000000000009.jpg`); real client audio graph (pan automation and tone starts recorded by test instrumentation);
+Gemini FIXTURE. Two consecutive runs, both **2/2 pass**:
+
+| Scenario | Measured |
+|---|---|
+| Bowl left of centre (box centre x≈0.22) | 6 pulses, pan −0.56 (formula 2·0.22−1 = −0.56) |
+| Slides to centre, held | one "Bowl centred in the camera." at 8.98 s (bowl reaches centre at 9 s); 0 pulses while held |
+| Slides right | pans +0.38, +0.45, +0.53 |
+| Bowl removed at 16 s | "I've lost the bowl…" once at 16.65 s; 0 cues afterwards |
+| Three overlapping bowls | selection asked; after "Left bowl", 10/10 pulses at pan −0.32 (expected ≈ −0.31), no jumping |
+| Detection freshness | 97 detect frames in ~20 s (≈4.9/s); detector round trip avg 34 ms / max 219 ms (run 1), avg 32 / max 47 ms (run 2); 0 dropped, 0 out-of-order |
+
+Detector benchmark (dev Mac, 640 px real photos): inference p50 18 ms / p95 24 ms; HTTP round trip p50 21 ms / p95 28 ms.
+
+### Not yet verified (hardware)
+Galaxy S25 + Galaxy Buds3 Pro: actual stereo separation, whether an open microphone switches the earbuds to mono
+call audio, the release-microphone fallback, TTS/beacon interplay, TalkBack, and manual checks A–J in
+[find-mode.md](find-mode.md). **Outstanding — not passed.**

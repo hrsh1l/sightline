@@ -11,6 +11,7 @@ If something fails, say so and use the recovery shown.
 - A packet or jar with a clearly printed **best before** or **use by** date (and ideally a batch code nearby).
 - Two similar items side by side (e.g. a tin of chopped tomatoes and a tin of beans), labels facing the camera.
 - An everyday non-food object (a mug, or a pen).
+- A bottle (for Find) and Galaxy Buds3 Pro or other stereo earbuds; detector running (`npm run detector`).
 - Optional: headphones, in case the room is noisy or the speaker echoes.
 
 ## Before you start (off camera)
@@ -33,6 +34,7 @@ latency afterwards).
 | 1:35 | Adjust and tap **Look again** (or say "Look again"). | Reads the printed date with its type ("best before…"), says whether it is before/after today if the date is complete; any batch code is not called a date. |
 | 1:55 | Place the two tins side by side. "What's this one?" | A short clarifying question ("the one on the left or the right?") rather than a guess. Answer it. |
 | 2:10 | Point at the mug/pen. "What's this?" | Plain identification; no invented ownership or history. |
+| 2:15 | (Earbuds in; stereo checked beforehand.) Put a bottle to one side of the table. "Find a bottle." Sweep the phone toward the sound until it chimes. "Read its label." | Beacon on the correct side; one chime + "Bottle centred in the camera."; label of that bottle read from a fresh photo. |
 | 2:20 | Recovery: tap **Mute microphone**, then unmute; optionally unplug USB for ~3 s and replug (`adb reverse` may need re-running). | Mute is announced; on reconnect, status returns to Live with no stale audio replayed. |
 | 2:35 | Tap **End session**. "Ending the session stops the camera, microphone and transmission immediately." | Camera indicator disappears; status Ended. Optionally show Diagnostics latency values measured during the demo. |
 | 2:45 | Close: "It runs on a phone today. A future native app could bring the same interaction to supported smart glasses — that isn't built yet." | — |

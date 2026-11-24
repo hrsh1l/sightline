@@ -37,10 +37,12 @@ Node server (express + ws) ── Gemini Live (gemini-3.8-live): voice in/out, f
   out of quota, the read falls back to the fast model once.
 - **Object boxes:** green boxes over the preview from the optional local YOLO26n detector (up to 4 FPS on small
   frames that never go to Gemini Live).
-- **Find mode** ("Where's the salt?", or type in *Find something*): tracks the item and plays **aiming beeps** —
-  left/right = where it is in the picture, higher pitch = higher in the picture, faster = closer to the centre, a
-  steady two-tone + vibration when it is centred. Generic objects use YOLO; anything else ("the red tin", "the
-  label text") uses Gemini box detection about once a second. Positions are image-relative aiming help only.
+- **Find an object** ("Find a bottle", or the *Find an object* buttons): cups/mugs, bottles, bowls, apples and
+  bananas, detected by the local YOLO26n model. A gentle **stereo beacon** follows the chosen object: left of the
+  camera view → left ear, right → right ear, faster pulses = better aligned; one chime + "Bottle centred in the
+  camera." when stably centred; spoken tilt hints; asks "the left one or the right one?" when several match; then
+  "Read its label" reads that object. Stereo check for earbuds, spoken-direction fallback, and a release-microphone
+  option for Bluetooth. Camera-view aiming only — see [docs/find-mode.md](docs/find-mode.md).
 - **Event sounds and haptics:** short cues for session start/end, hold-still/shutter, working, found, lost, error.
 - If Gemini Live is unavailable, **Snapshot mode** sends a fresh still photo with each typed question to the
   vision model and reads the answer with browser text-to-speech.
@@ -137,6 +139,7 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `npm run check:secrets` | Scan the client build for keys or direct provider endpoints (run after build) |
 | `npm run check:models` | Verify the configured account can actually use the configured models |
 | `npm run detector` | Run the optional local YOLO detector on 127.0.0.1:8765 |
+| `npm run test:e2e:find` | Real-detector Find test in Chromium (needs `npm run detector`) |
 | `npx tsx scripts/eval-label.ts` | Live label-reading probe on a synthetic packet image (uses API quota) |
 | `npm run verify` | typecheck + lint + test + build + secret scan |
 
@@ -155,7 +158,8 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `ALLOWED_ORIGINS` | — | Extra WebSocket origins if a proxy rewrites Host |
 | `MAX_SESSION_MINUTES` / `MAX_CONCURRENT_SESSIONS` | `20` / `2` | Resource limits |
 | `APP_TIMEZONE` | `Europe/London` | Date comparisons on packaging |
-| `DETECTOR_URL` | — | e.g. `http://127.0.0.1:8765` to enable the optional YOLO overlay |
+| `DETECTOR_URL` | — | `http://127.0.0.1:8765` enables object boxes and Find an object |
+| `FIND_GEMINI` | `false` | Experimental Gemini boxes for unsupported Find items (uses quota) |
 
 ## Object boxes (optional local YOLO detector)
 
