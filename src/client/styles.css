@@ -597,6 +597,17 @@ p {
   }
 }
 
+/* Find candidates (needs_selection): dashed thick outline, labelled Left / Middle / Right. */
+.detections__box--candidate {
+  border-width: 4px;
+  border-style: dashed;
+}
+
+.detections__chip--candidate {
+  font-size: 1.0625rem;
+  font-weight: 800;
+}
+
 .detections__chip {
   position: absolute;
   display: block;
@@ -652,8 +663,112 @@ p {
 
 /* ------------------------------------------------------------------ find */
 
-.find-form {
-  margin-top: 0.25rem;
+.find__intro {
+  font-weight: 600;
+}
+
+.find__subheading {
+  font-size: 1.125rem;
+  margin: 0 0 0.5rem;
+}
+
+.find-choose,
+.find-options,
+.stereo-check {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 2px solid var(--surface-2);
+}
+
+.find-targets,
+.find-candidates,
+.calibration__answers {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 9rem), 1fr));
+  gap: var(--gap);
+  margin-bottom: 0.5rem;
+}
+
+.calibration__answers {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 14rem), 1fr));
+}
+
+.btn--candidate {
+  min-height: 4.5rem;
+  font-size: 1.25rem;
+  border-width: 3px;
+  border-color: var(--text);
+}
+
+.find-status__prompt {
+  margin: 0;
+}
+
+.find-talk > .hint {
+  margin: 0.5rem 0 0;
+}
+
+.find-status__text:focus,
+.calibration__step:focus,
+.calibration__question:focus,
+.calibration__result:focus {
+  scroll-margin: 1rem;
+}
+
+.range-setting {
+  margin-bottom: 0.75rem;
+}
+
+.range-setting__row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 1rem;
+  font-weight: 700;
+}
+
+.range-setting__value {
+  font-variant-numeric: tabular-nums;
+}
+
+.range-input {
+  display: block;
+  width: 100%;
+  min-height: var(--touch);
+  margin: 0;
+  accent-color: var(--primary-bg);
+  cursor: pointer;
+}
+
+.calibration__step,
+.calibration__question,
+.calibration__result {
+  font-size: 1.25rem;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.calibration__step {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+}
+
+.calibration__result {
+  padding-left: 0.75rem;
+  border-left: 4px solid var(--text);
+}
+
+.tone-icon {
+  width: 3rem;
+  height: 1.5rem;
+  flex: none;
+}
+
+.stereo-check > .btn {
+  width: 100%;
+  margin-bottom: 0.5rem;
 }
 
 .find-status {
@@ -682,6 +797,18 @@ p {
   border-color: var(--warn);
 }
 
+.find-status--needs_selection {
+  border-style: double;
+  border-width: 6px;
+  border-color: var(--focus);
+}
+
+.find-status--unsupported,
+.find-status--error {
+  border-style: dotted;
+  border-color: var(--error);
+}
+
 .find-status__text {
   display: flex;
   align-items: flex-start;
@@ -705,8 +832,14 @@ p {
 }
 
 .find-icon--lost,
-.find-icon--not_found {
+.find-icon--not_found,
+.find-icon--needs_selection {
   color: var(--warn);
+}
+
+.find-icon--unsupported,
+.find-icon--error {
+  color: var(--error);
 }
 
 .btn--find-stop {
@@ -864,7 +997,7 @@ p {
 
 .setting {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
   column-gap: 0.75rem;
   min-height: var(--touch);
@@ -998,8 +1131,12 @@ p {
   .find-status {
     border-color: CanvasText;
   }
-  .find-icon {
+  .find-icon,
+  .tone-icon {
     color: CanvasText;
+  }
+  .range-input {
+    forced-color-adjust: auto;
   }
   .detections__box {
     border-color: Highlight;

@@ -1,90 +1,7 @@
-import { useId, type ReactNode, type Ref } from 'react';
+import type { Ref } from 'react';
 import type { AssistantController, AssistantSettings, AssistantState } from '../contracts.js';
 import { Diagnostics } from './Diagnostics.js';
-
-function Checkbox({
-  label,
-  checked,
-  onChange,
-  disabled,
-  hint,
-}: {
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-  disabled?: boolean;
-  hint?: ReactNode;
-}) {
-  const id = useId();
-  const hintId = useId();
-  return (
-    <div className="setting">
-      <input
-        id={id}
-        type="checkbox"
-        className="setting__check"
-        checked={checked}
-        disabled={disabled}
-        aria-describedby={hint ? hintId : undefined}
-        onChange={(e) => onChange(e.target.checked)}
-      />
-      <label htmlFor={id} className="setting__label">
-        {label}
-      </label>
-      {hint && (
-        <p id={hintId} className="hint setting__hint">
-          {hint}
-        </p>
-      )}
-    </div>
-  );
-}
-
-function RadioGroup<T extends string>({
-  legend,
-  name,
-  value,
-  options,
-  onChange,
-}: {
-  legend: string;
-  name: string;
-  value: T;
-  options: Array<{ value: T; label: string; hint?: string }>;
-  onChange: (v: T) => void;
-}) {
-  const base = useId();
-  return (
-    <fieldset className="setting-group">
-      <legend>{legend}</legend>
-      {options.map((o) => {
-        const id = `${base}-${o.value}`;
-        return (
-          <div className="setting" key={o.value}>
-            <input
-              id={id}
-              type="radio"
-              className="setting__check"
-              name={name}
-              value={o.value}
-              checked={value === o.value}
-              aria-describedby={o.hint ? `${id}-hint` : undefined}
-              onChange={() => onChange(o.value)}
-            />
-            <label htmlFor={id} className="setting__label">
-              {o.label}
-            </label>
-            {o.hint && (
-              <p id={`${id}-hint`} className="hint setting__hint">
-                {o.hint}
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </fieldset>
-  );
-}
+import { Checkbox, RadioGroup } from './FormControls.js';
 
 /** Secondary settings in a native <details>, so it is keyboard and screen-reader operable without custom focus traps. */
 export function SettingsPanel({
@@ -167,22 +84,16 @@ export function SettingsPanel({
               hint="Short sounds for start, photo taken, item found, item lost and errors."
             />
             <Checkbox
-              label="Aiming beeps in Find"
+              label="Stereo beacon in Find"
               checked={s.spatialAudio}
               onChange={(v) => set({ spatialAudio: v })}
-              hint="Left/right in your ears = left/right in the picture, higher pitch = higher, faster = closer to the centre."
+              hint="A beep in your left or right ear shows where the object is in the camera view; faster beeps mean it is nearer the centre of the picture. Volume, spoken directions and the stereo check are in Find an object."
             />
             <Checkbox
               label="Vibration"
               checked={s.haptics}
               onChange={(v) => set({ haptics: v })}
-              hint="Vibrates when a photo is taken, when the item is centred and when it is found."
-            />
-            <Checkbox
-              label="I’m using headphones (3D sound)"
-              checked={s.headphones}
-              onChange={(v) => set({ headphones: v })}
-              hint="More natural left/right sound. Leave off when using the phone speaker."
+              hint="Vibrates when a photo is taken, when the object is centred and when it is found."
             />
           </fieldset>
           <Checkbox label="Show diagnostics" checked={s.showDiagnostics} onChange={(v) => set({ showDiagnostics: v })} />

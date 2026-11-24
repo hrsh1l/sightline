@@ -7,7 +7,7 @@
  */
 import { vi } from 'vitest';
 import type { AssistantController, AssistantState, FindStatus, Listener } from '../../contracts.js';
-import type { LabelEvidence, ServerDetections } from '../../../shared/protocol.js';
+import type { FindCandidate, LabelEvidence, ServerDetections } from '../../../shared/protocol.js';
 
 export function makeState(overrides: Partial<AssistantState> = {}): AssistantState {
   return {
@@ -33,6 +33,7 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
     lastEvidence: null,
     detections: null,
     find: null,
+    calibration: { step: 'idle', heardSeparation: null, micActive: false },
     error: null,
     announcement: null,
     settings: {
@@ -45,7 +46,9 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       earcons: true,
       spatialAudio: true,
       haptics: true,
-      headphones: false,
+      cueVolume: 0.7,
+      guidanceMode: 'stereo',
+      findMicPolicy: 'keep',
     },
     server: { configured: true, liveModel: 'fixture-live', visionModel: 'fixture-vision', detector: false, sessionId: null, timeZone: 'Europe/London' },
     metrics: {
@@ -55,6 +58,8 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       framesSent: 0,
       framesDropped: 0,
       reconnects: 0,
+      detectionAgeMs: null,
+      detectionRate: null,
     },
     ...overrides,
   };
@@ -128,14 +133,30 @@ export function makeDetections(overrides: Partial<ServerDetections> = {}): Serve
 
 export function makeFind(overrides: Partial<FindStatus> = {}): FindStatus {
   return {
-    query: 'salt',
+    query: 'bottle',
     state: 'tracking',
-    source: 'gemini',
-    target: { label: 'salt', score: 0.9, box: { x: 0.05, y: 0.05, w: 0.2, h: 0.2 } },
-    description: 'left of the picture, near the top',
+    source: 'yolo',
+    target: { label: 'bottle', score: 0.9, box: { x: 0.05, y: 0.05, w: 0.2, h: 0.2 } },
+    description: 'left of the picture',
     updatedAt: Date.UTC(2026, 10, 23, 12, 0),
+    trackId: 4,
+    observedAt: Date.UTC(2026, 10, 23, 12, 0),
+    candidates: [],
+    lastPrompt: null,
     ...overrides,
   };
+}
+
+/** Two or three cups to choose between (needs_selection). */
+export function makeCandidates(positions: Array<FindCandidate['position']> = ['left', 'middle', 'right']): FindCandidate[] {
+  const x: Record<FindCandidate['position'], number> = { left: 0.05, middle: 0.4, right: 0.75 };
+  return positions.map((position, i) => ({
+    id: 10 + i,
+    label: 'cup',
+    score: 0.9 - i * 0.1,
+    box: { x: x[position], y: 0.3, w: 0.2, h: 0.3 },
+    position,
+  }));
 }
 
 export class FakeController implements AssistantController {
@@ -169,6 +190,10 @@ export class FakeController implements AssistantController {
   readLabel = vi.fn(async (): Promise<void> => {});
   find = vi.fn(async (_query: string): Promise<void> => {});
   stopFind = vi.fn((): void => {});
+  selectTarget = vi.fn((_candidateId: number): void => {});
+  startCalibration = vi.fn(async (): Promise<void> => {});
+  answerCalibration = vi.fn((_heardSeparation: boolean): void => {});
+  cancelCalibration = vi.fn((): void => {});
   setTorch = vi.fn(async (_on: boolean): Promise<void> => {});
   lookAgain = vi.fn(async (): Promise<void> => {});
   repeat = vi.fn((): void => {});
