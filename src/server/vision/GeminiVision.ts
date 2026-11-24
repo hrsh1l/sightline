@@ -170,7 +170,8 @@ const DEFAULTS = {
   fallbackThinking: ThinkingLevel.LOW,
   guideTimeoutMs: 14_000,
   guideFallbackTimeoutMs: 10_000,
-  guideThinking: ThinkingLevel.MEDIUM,
+  // LOW: guide extraction runs on the fast model first for conversational latency (see config.guideModel).
+  guideThinking: ThinkingLevel.LOW,
   twoPass: true,
 } as const;
 
@@ -523,16 +524,18 @@ export function createGeminiVision(deps: {
     signal: AbortSignal | undefined,
     attempt: (callModel: string, isFallback: boolean) => Promise<T>,
     onFallback: (reason: string) => void,
+    models: { primary: string; fallback: string } = { primary: model, fallback: fastModel },
   ): Promise<{ value: T; usedModel: string }> {
+    const { primary, fallback } = models;
     try {
-      return { value: await attempt(model, false), usedModel: model };
+      return { value: await attempt(primary, false), usedModel: primary };
     } catch (err) {
-      if (signal?.aborted || fastModel === model || !(err instanceof VisionError) || !retryable.has(err)) throw err;
+      if (signal?.aborted || fallback === primary || !(err instanceof VisionError) || !retryable.has(err)) throw err;
       const reason = err.code === 'invalid_output' ? 'invalid_output' : err.message.includes('timed out') ? 'timeout' : err.code;
       onFallback(reason);
-      log.info('vision_model_fallback', { op, from: model, to: fastModel, reason });
+      log.info('vision_model_fallback', { op, from: primary, to: fallback, reason });
       try {
-        return { value: await attempt(fastModel, true), usedModel: fastModel };
+        return { value: await attempt(fallback, true), usedModel: fallback };
       } catch (err2) {
         if (signal?.aborted) throw err2;
         throw err;
@@ -781,6 +784,7 @@ export function createGeminiVision(deps: {
       meta.imageChars = parts.reduce((n, p) => n + (p.inlineData?.data?.length ?? 0), 0);
 
       const t2 = performance.now();
+      const guideModels = { primary: config.guideModel, fallback: config.guideModel === model ? fastModel : model };
       const { value: raw, usedModel } = await withModelFallback(
         'guide',
         signal,
@@ -808,6 +812,7 @@ export function createGeminiVision(deps: {
           return parsed.data;
         },
         (reason) => (meta.modelFallback = reason),
+        guideModels,
       );
       meta.readMs = Math.round(performance.now() - t2);
 

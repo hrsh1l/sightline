@@ -202,10 +202,12 @@ export function quantityGrounded(text: string, sourceText: string): boolean {
 
 /** One concrete adjustment per issue, used only when the model gave none. */
 export const DEFAULT_ADJUSTMENT: Record<Exclude<ViewIssueKind, 'none'>, string> = {
-  cut_off_top: 'The top of the text is cut off. Move the phone up a little.',
-  cut_off_bottom: 'The text continues below the picture. Move the phone down a little.',
-  cut_off_left: 'The text is cut off on the left. Move the phone a little to the left.',
-  cut_off_right: 'The text is cut off on the right. Move the phone a little to the right.',
+  // Cut-off wording is fixed (not the model's): live runs gave contradictory up/down directions for the same view.
+  // "Move back" widens the view whichever edge is cut, so it cannot point the wrong way.
+  cut_off_top: 'The top of the instructions is outside the frame. Move the phone slightly back.',
+  cut_off_bottom: 'The bottom of the instructions is outside the frame. Move the phone slightly back.',
+  cut_off_left: 'The left side of the instructions is outside the frame. Move the phone slightly back.',
+  cut_off_right: 'The right side of the instructions is outside the frame. Move the phone slightly back.',
   too_far: 'The text is too small to read. Bring the phone a little closer.',
   too_close: 'The phone is too close to read the text. Move it back a little.',
   glare: 'There is a reflection on the text. Tilt the item slightly.',
@@ -357,6 +359,8 @@ export function normaliseView(
   if (issue === 'none') {
     issueEvidence = null;
     adjustment = null;
+  } else if (issue.startsWith('cut_off_')) {
+    adjustment = DEFAULT_ADJUSTMENT[issue];
   } else {
     adjustment = adjustment ?? DEFAULT_ADJUSTMENT[issue];
   }

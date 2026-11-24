@@ -13,6 +13,8 @@ const EnvSchema = z.object({
   VISION_MODEL: z.string().min(1).default('gemini-3.6-flash'),
   /** Fast model for find-mode box detection (called up to ~1x/s while finding). */
   LOCATE_MODEL: z.string().min(1).default('gemini-3.5-flash-lite'),
+  /** Instruction-guide extraction (conversational latency matters; measured 2026-11-24: 3.6-flash 12-14 s or timeouts). */
+  GUIDE_MODEL: z.string().min(1).default('gemini-3.5-flash-lite'),
   /** Allow Gemini box detection for find queries outside the supported YOLO list (off: supported list only). */
   FIND_GEMINI: boolish,
   LIVE_VOICE: z.string().min(1).default('Kore'),
@@ -37,6 +39,8 @@ export interface AppConfig {
   liveModel: string;
   visionModel: string;
   locateModel: string;
+  /** Primary model for instruction-guide extraction; falls back once to visionModel (or locateModel). */
+  guideModel: string;
   /** Gemini-based find for unsupported items (default false: honest supported-list only). */
   findGemini: boolean;
   liveVoice: string;
@@ -81,6 +85,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     liveModel: e.LIVE_MODEL,
     visionModel: e.VISION_MODEL,
     locateModel: e.LOCATE_MODEL,
+    guideModel: e.GUIDE_MODEL,
     findGemini: e.FIND_GEMINI,
     liveVoice: e.LIVE_VOICE,
     language: e.ASSISTANT_LANGUAGE,
