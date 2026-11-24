@@ -231,3 +231,25 @@ export function encodeCrop(img: DecodedImage, rect: CropRect, maxSide: number = 
   if (size.width !== rect.width || size.height !== rect.height) p = p.resize(size.width, size.height, { fit: 'fill' });
   return toJpeg(p, quality);
 }
+
+export type FrameEdge = 'top' | 'bottom' | 'left' | 'right';
+
+/**
+ * Evidence for a cut-off view that does not rely on the model's own completeness judgement: which photo edges the
+ * pass-1 text regions touch (box_2d in 0..1000, unpadded). Live 2026-11-24: a photo cut through the middle of the
+ * instructions was reported "complete" by the extraction model; its text region reached the bottom edge.
+ */
+export function edgesTouched(raw: unknown, margin = 12): FrameEdge[] {
+  const regions = raw && typeof raw === 'object' && Array.isArray((raw as { regions?: unknown }).regions) ? (raw as { regions: unknown[] }).regions : [];
+  const edges = new Set<FrameEdge>();
+  for (const r of regions) {
+    const box = r && typeof r === 'object' ? parseBox2d((r as { box_2d?: unknown }).box_2d) : null;
+    if (!box) continue;
+    if (box.ymin <= margin) edges.add('top');
+    if (box.ymax >= 1000 - margin) edges.add('bottom');
+    if (box.xmin <= margin) edges.add('left');
+    if (box.xmax >= 1000 - margin) edges.add('right');
+  }
+  return (['bottom', 'top', 'right', 'left'] as const).filter((e) => edges.has(e));
+}
+

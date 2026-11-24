@@ -42,13 +42,15 @@ import {
   REGION_RESPONSE_SCHEMA,
   decodeImage,
   encodeCrop,
+  edgesTouched,
   encodeOverview,
   planCrops,
   type DecodedImage,
+  type FrameEdge,
   type EncodedImage,
   type RegionKind,
 } from './detailRead.js';
-import { GUIDE_RESPONSE_SCHEMA, ModelGuide, buildGuideExtraction, guideRegionLabel } from './guideExtract.js';
+import { GUIDE_RESPONSE_SCHEMA, ModelGuide, applyEdgeEvidence, buildGuideExtraction, guideRegionLabel } from './guideExtract.js';
 import { LOCATE, LOCATE_RESPONSE_SCHEMA, parseLocateOutput } from './locate.js';
 import {
   buildAnswerInstruction,
@@ -569,6 +571,8 @@ export function createGeminiVision(deps: {
   interface DetailCrops {
     overview: EncodedImage;
     crops: { image: EncodedImage; kind: RegionKind }[];
+    /** Photo edges touched by pass-1 text regions (cut-off evidence). */
+    edges: FrameEdge[];
   }
 
   /** Pass-2 parts: intro text, overview (HIGH), then caption + crop (ULTRA_HIGH) for each crop. */
@@ -640,6 +644,7 @@ export function createGeminiVision(deps: {
     }
     meta.pass1Ms = Math.round(performance.now() - t1);
     const planned = planCrops(regionsJson, decoded.width, decoded.height);
+    const edges = edgesTouched(regionsJson);
     meta.regions = planned.length;
     if (planned.length === 0) {
       meta.detailSkipped = 'no_regions';
@@ -669,7 +674,7 @@ export function createGeminiVision(deps: {
     }
     meta.crops = crops.length;
     meta.cropPx = crops.map((c) => `${c.image.width}x${c.image.height}`).join(' ');
-    return { overview, crops };
+    return { overview, crops, edges };
   }
 
   const newMeta = (): ExtractMeta => ({
@@ -823,7 +828,10 @@ export function createGeminiVision(deps: {
         log.warn('vision_error', { op: 'guide', model: usedModel, code: 'invalid_output', reason: 'guide' });
         throw new VisionError('The vision model returned output that could not be used.', 'invalid_output');
       }
-      const { extraction, stats, replacements } = built;
+      const { stats, replacements } = built;
+      const edgeCheck = applyEdgeEvidence(built.extraction, detail?.edges ?? []);
+      const extraction = edgeCheck.extraction;
+      if (edgeCheck.applied) log.info('vision_guide_edge_evidence', { edges: (detail?.edges ?? []).join(','), issue: extraction.issue });
       for (const r of replacements) {
         log.warn('vision_guide_spoken_replaced', { sectionIndex: r.sectionIndex, n: r.n, extraCount: r.extraCount, droppedCount: r.droppedCount });
       }

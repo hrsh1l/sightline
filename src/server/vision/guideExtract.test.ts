@@ -538,3 +538,24 @@ describe('default guide model order (config.guideModel = fast model)', () => {
   });
 });
 
+
+describe('cut-off evidence from text regions touching the photo edge (regression: live run 2026-11-24)', () => {
+  it('detects which edges pass-1 regions touch', async () => {
+    const { edgesTouched } = await import('./detailRead.js');
+    expect(edgesTouched({ regions: [{ box_2d: [120, 300, 998, 700], kind: 'cooking_instructions' }] })).toEqual(['bottom']);
+    expect(edgesTouched({ regions: [{ box_2d: [0, 0, 500, 1000], kind: 'x' }] })).toEqual(['top', 'right', 'left']);
+    expect(edgesTouched({ regions: [{ box_2d: [100, 100, 900, 900], kind: 'x' }] })).toEqual([]);
+    expect(edgesTouched(null)).toEqual([]);
+  });
+  it('withholds a "complete" claim for the section at the touched edge and gives the fixed adjustment', async () => {
+    const { applyEdgeEvidence } = await import('./guideExtract.js');
+    const sec = (id: string) => ({ id, title: id, kind: 'method' as const, complete: true, missing: [], steps: [{ id: `${id}-s1`, n: 1, sourceText: 'Heat for 3 minutes.', spoken: 'Heat for 3 minutes.', quantities: [], warnings: [] }] });
+    const g = { frameIds: [1], capturedAt: [1], readability: 'clear' as const, issue: 'none' as const, issueEvidence: null, adjustment: null, title: null, sections: [sec('microwave'), sec('oven')], warnings: [], model: 'm', latencyMs: 1 };
+    const { extraction, applied } = applyEdgeEvidence(g, ['bottom']);
+    expect(applied).toBe(true);
+    expect(extraction.sections.map((s) => s.complete)).toEqual([true, false]);
+    expect(extraction.sections[1]!.missing[0]).toMatch(/bottom edge/);
+    expect(extraction).toMatchObject({ readability: 'partial', issue: 'cut_off_bottom', adjustment: DEFAULT_ADJUSTMENT.cut_off_bottom });
+    expect(applyEdgeEvidence(g, []).applied).toBe(false);
+  });
+});

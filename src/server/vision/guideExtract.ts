@@ -371,3 +371,30 @@ export function normaliseView(
 export function guideRegionLabel(kind: RegionKind): string {
   return kind === 'cooking_instructions' ? 'instructions' : REGION_KIND_LABEL[kind];
 }
+
+/**
+ * Apply edge evidence from pass 1 (see edgesTouched): instruction text touching a photo edge means the adjacent
+ * section may continue outside the frame, whatever the model said. Bottom -> last section, top -> first section,
+ * left/right -> every section. A 'none'/'clear' view becomes partial with the matching cut-off issue and its fixed
+ * adjustment. Never invents text; only withholds a "complete" claim.
+ */
+export function applyEdgeEvidence(g: GuideExtraction, edges: readonly ('top' | 'bottom' | 'left' | 'right')[]): { extraction: GuideExtraction; applied: boolean } {
+  if (edges.length === 0 || g.sections.length === 0) return { extraction: g, applied: false };
+  const note = (e: string) => `The text reaches the ${e} edge of the photo, so it may continue outside it.`;
+  const sections = g.sections.map((sec, i) => {
+    const hit = edges.filter((e) => (e === 'bottom' && i === g.sections.length - 1) || (e === 'top' && i === 0) || e === 'left' || e === 'right');
+    if (hit.length === 0) return sec;
+    const missing = [...sec.missing, ...hit.map(note).filter((n) => !sec.missing.includes(n))].slice(0, 6);
+    return { ...sec, complete: false, missing };
+  });
+  let { readability, issue, issueEvidence, adjustment } = g;
+  if (issue === 'none' || readability === 'clear') {
+    const e = edges[0]!;
+    issue = `cut_off_${e}` as GuideExtraction['issue'];
+    readability = 'partial';
+    issueEvidence = `The instructions touch the ${e} edge of the photo.`;
+    adjustment = DEFAULT_ADJUSTMENT[issue as Exclude<GuideExtraction['issue'], 'none'>];
+  }
+  return { extraction: { ...g, sections, readability, issue, issueEvidence, adjustment }, applied: true };
+}
+
