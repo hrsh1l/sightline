@@ -86,3 +86,15 @@ Status values: `todo`, `in progress`, `done (verified: …)`, `deferred`, `block
 | 22 | S25 + Buds3 Pro checks A–J | user | **outstanding** |
 
 `feat/sightline` HEAD is green again (typecheck, lint, 763 tests, build, secret scan, both e2e suites).
+
+## v4 Instruction companion — integrated 2026-11-24
+
+| # | Task | Owner | Status |
+|---|---|---|---|
+| 23 | Contracts v4 (`src/shared/guide.ts`, guide messages, tools, resume key), FIXTURE extractions | lead | done |
+| 24 | Extraction + view assessment (`extractGuide`, faithfulness checks) | extraction worker | done + merged |
+| 25 | Guide state machine, store, tools, session integration | guide-state worker | done + merged |
+| 26 | Client controller + accessible Instructions panel | guide-client worker | done + merged |
+| 27 | Integration: fast guide model, fixed cut-off adjustments, edge evidence, same-model retry, prompt fix, camera-start wait | lead | done (1023 tests, 10/10 e2e, live runs above) |
+| 28 | Optional timers | — | deferred (core flow prioritised) |
+| 29 | S25 demo of the instruction companion | user | outstanding |

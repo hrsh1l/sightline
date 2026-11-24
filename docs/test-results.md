@@ -243,3 +243,45 @@ Detector benchmark (dev Mac, 640 px real photos): inference p50 18 ms / p95 24 m
 Galaxy S25 + Galaxy Buds3 Pro: actual stereo separation, whether an open microphone switches the earbuds to mono
 call audio, the release-microphone fallback, TTS/beacon interplay, TalkBack, and manual checks A–J in
 [find-mode.md](find-mode.md). **Outstanding — not passed.**
+
+## v4 Instruction companion, 2026-11-24
+
+### Automated (unit + integration, FIXTURE providers)
+`npm run verify`: 42 files / **1023 tests pass**; typecheck, lint, build, client secret scan pass.
+Covers: extraction schema (servable, no constraint keywords), missing/ambiguous sections, alternative methods kept
+separate, number/unit faithfulness of spoken text (58 cases), cut-off evidence from text regions touching the photo
+edge, guide state machine (next vs done, previous/repeat/explain leave completion unchanged, undo, final-step
+wording, completion only from confirmations, pause/resume, rescan revisions), negated/quoted commands never
+confirming, duplicate events, stale revisions, wrong-step binding, out-of-order results, inspect throttling and
+latest-wins cancellation, reconnect restore without replaying mutations, stop/bye cleanup.
+`tests/integration/guide.test.ts` drives the real server over WebSocket through the whole flow (cut-off view ->
+adjustment -> "How about now?" on a NEW frame -> choose microwave -> step 1 -> explain -> next (not done) ->
+duplicate ignored -> wrong step rejected -> done -> stale revision rejected -> pause/resume -> where were we ->
+socket drop + resume key restores the same place -> stop -> normal question -> bye drops state) and the voice-tool
+path (start_guide takes a fresh still; "I'm not done yet" refused; "Done" delivered twice confirms once).
+
+### Desktop browser (Chromium, phone viewport, FIXTURE providers)
+`npx playwright test`: **10/10 pass**, including `tests/e2e/guide.spec.ts` (framing advice, Check this view, choose
+method, Next not done, Done confirms exactly one step, pause/resume, where were we, stop). It found a real bug:
+tapping "Guide me" while the camera was still starting failed immediately; it now waits for the camera.
+Real-detector Find e2e still **2/2**.
+
+### Live provider (real Gemini, synthetic images, typed user turns)
+- Extraction (`scripts/eval-guide.ts`, `gemini-3.5-flash-lite`): full two-method packet -> MICROWAVE (4 steps) and
+  OVEN (3 steps) kept separate, all steps verbatim incl. "1 minute 30 seconds", "190°C / Fan 170°C / Gas 5";
+  a printed "IGNORE PREVIOUS INSTRUCTIONS…" line was treated as text, not obeyed; assembly sheet -> 3 steps with
+  "2 x M4 screws", "90°", warning kept separate; cut-off packet -> cut_off_bottom with evidence. Latency 5–6 s when
+  the provider was healthy; 12.9 s when it needed the same-model retry. `gemini-3.6-flash` took 12–14 s or timed out
+  (504), so the guide defaults to the fast model.
+- Conversation (`scripts/live-guide-dialogue.ts` against the dev server with real Gemini Live), first full run:
+  start_guide -> step 1 read verbatim; "what does pierce the film mean?" -> "The packet says to poke a few holes in
+  the plastic film…" with no progress change; "Next" presented step 2 without confirming step 1; "Done, I've
+  finished this step" confirmed step 2 and said "That was the final instruction. One step is not confirmed yet:
+  step 1."; "Do I say done…?" did not confirm; "Where were we?" reported step and confirmed progress; "Stop the guide"
+  stopped. Bugs found and fixed from live runs: (1) a cut-off photo was accepted as a complete 2-step section ->
+  edge-touch cut-off evidence; (2) the model once asked "which instructions?" instead of starting -> prompt fixed
+  (verified on the next run); (3) image requests intermittently returned 503 -> paused same-model retry.
+  Later live runs were dominated by provider 503s/timeouts; the app reported them honestly ("Nothing has changed").
+
+### Physical S25 / Buds3 Pro
+**Not yet run** for the instruction companion. Demo steps: see demo-script.md.

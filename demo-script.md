@@ -11,6 +11,7 @@ If something fails, say so and use the recovery shown.
 - A packet or jar with a clearly printed **best before** or **use by** date (and ideally a batch code nearby).
 - Two similar items side by side (e.g. a tin of chopped tomatoes and a tin of beans), labels facing the camera.
 - An everyday non-food object (a mug, or a pen).
+- A packet whose cooking instructions you can partly hide with a hand, or a printed instruction sheet.
 - A bottle (for Find) and Galaxy Buds3 Pro or other stereo earbuds; detector running (`npm run detector`).
 - Optional: headphones, in case the room is noisy or the speaker echoes.
 
@@ -34,6 +35,11 @@ latency afterwards).
 | 1:35 | Adjust and tap **Look again** (or say "Look again"). | Reads the printed date with its type ("best before…"), says whether it is before/after today if the date is complete; any batch code is not called a date. |
 | 1:55 | Place the two tins side by side. "What's this one?" | A short clarifying question ("the one on the left or the right?") rather than a guess. Answer it. |
 | 2:10 | Point at the mug/pen. "What's this?" | Plain identification; no invented ownership or history. |
+| 2:00 | Hold a packet with cooking instructions partly off the bottom of the view. "Guide me through these instructions." | One adjustment based on the photo (e.g. "The bottom of the instructions is outside the frame. Move the phone slightly back."). |
+| 2:10 | Move the phone back. "How about now?" | New photo; if several methods: "I can see microwave and oven instructions. Which would you like?" → "Microwave." → "Step 1 of N: …" read as printed. |
+| 2:20 | "Wait, what does that mean?" then "Next." | Plain explanation ("the packet says…"); Next reads step 2 and step 1 is NOT marked done (panel shows "Read", not "Confirmed done"). |
+| 2:30 | "Done." then "Pause", "Resume", "Where were we?" | Step 2 confirmed by you; resumes at the same step; status reports current step and confirmed steps. |
+| 2:40 | "Stop the guide." then "What am I holding?" | Guide stops; normal question works. |
 | 2:15 | (Earbuds in; stereo checked beforehand.) Put a bottle to one side of the table. "Find a bottle." Sweep the phone toward the sound until it chimes. "Read its label." | Beacon on the correct side; one chime + "Bottle centred in the camera."; label of that bottle read from a fresh photo. |
 | 2:20 | Recovery: tap **Mute microphone**, then unmute; optionally unplug USB for ~3 s and replug (`adb reverse` may need re-running). | Mute is announced; on reconnect, status returns to Live with no stale audio replayed. |
 | 2:35 | Tap **End session**. "Ending the session stops the camera, microphone and transmission immediately." | Camera indicator disappears; status Ended. Optionally show Diagnostics latency values measured during the demo. |

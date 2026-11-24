@@ -44,6 +44,15 @@ dependable alternatives for noisy kitchens.
 - An optional, private local YOLO26n detector for image-relative object boxes, behind an interface that can be
   removed without affecting conversation.
 
+## Instruction companion
+
+"Guide me through these instructions" turns a packet or instruction sheet into a conversation. Sightline checks a
+fresh photo and asks for one concrete adjustment when the text isn't readable, reads the printed steps verbatim
+(keeping microwave and oven methods separate), and walks through them at the user's pace: questions don't lose the
+place, "Next" is not "Done", and only the user's own "Done" marks progress. Voice matters most here: hands are busy
+with the item, and the user can interrupt, ask what a word means, or ask "Where were we?" without looking at a
+screen. The app, not the model, owns progress, so it survives interruptions and brief reconnects.
+
 ## Original engineering contribution
 
 We did not train a model. The contribution is the product and systems layer around existing models:

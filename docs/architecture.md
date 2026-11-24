@@ -74,3 +74,22 @@ fresh still photo to `generateContent`, the answer is shown and spoken with brow
   audio rate limit; max session duration; max concurrent sessions.
 - Tools are a fixed allow-list (`read_label`, `look_again`); there is no URL fetching or command execution.
 - Text read from images is passed to the model as untrusted content, never as instructions.
+
+## Instruction companion (v4)
+
+```
+"Guide me" / Check this view ─► fresh detail still ─► guide.inspect / start_guide tool
+   server: throttle (2.5 s), latest-wins AbortController ─► VisionService.extractGuide
+      pass 1 (fast model): instruction regions (+ edges touched = cut-off evidence)
+      pass 2 (GUIDE_MODEL, one paused retry): sections → verbatim steps, spoken text (numbers checked), issue + 1 adjustment
+   GuideMachine (app-owned, per resume key, memory only, 30 min TTL)
+      phases idle → acquiring_image → needs_better_view | choosing_section → guiding ⇄ paused → completed | error
+      mutations bound to guideId + revision (+ stepId), idempotent per request/tool-call id
+   ─► ServerGuide snapshot to the UI + `say` text to Gemini Live (app event or tool response)
+```
+
+Tradeoffs: progress lives on the server, not in model history, so a Gemini reconnect or a brief socket drop keeps the
+user's place; mutations are never replayed. The model interprets intent, but the app validates every change and
+rechecks "Done" against the user's actual transcribed words. Exact step text comes from the app, so the model is
+asked to read it verbatim; numbers in simplified wording are checked against the printed text and fall back to the
+printed text if they differ. Live latency is dominated by the vision call (5–6 s on the fast model when healthy).

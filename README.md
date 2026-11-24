@@ -43,6 +43,12 @@ Node server (express + ws) ── Gemini Live (gemini-3.8-live): voice in/out, f
   camera." when stably centred; spoken tilt hints; asks "the left one or the right one?" when several match; then
   "Read its label" reads that object. Stereo check for earbuds, spoken-direction fallback, and a release-microphone
   option for Bluetooth. Camera-view aiming only — see [docs/find-mode.md](docs/find-mode.md).
+- **Instruction companion** ("Guide me through these instructions"): checks a fresh photo, gives one evidence-based
+  camera adjustment if the instructions aren't readable ("How about now?" checks a new photo), extracts the visible
+  steps verbatim (methods such as microwave/oven kept separate), and walks through them: Next, Repeat, Explain,
+  Done, Undo, Pause/Resume, "Where were we?". The app owns progress: reading a step never marks it done; only your
+  "Done" does. Works for packaging and simple printed assembly sheets. See
+  [docs/instruction-companion.md](docs/instruction-companion.md).
 - **Event sounds and haptics:** short cues for session start/end, hold-still/shutter, working, found, lost, error.
 - If Gemini Live is unavailable, **Snapshot mode** sends a fresh still photo with each typed question to the
   vision model and reads the answer with browser text-to-speech.
@@ -140,6 +146,8 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `npm run check:models` | Verify the configured account can actually use the configured models |
 | `npm run detector` | Run the optional local YOLO detector on 127.0.0.1:8765 |
 | `npm run test:e2e:find` | Real-detector Find test in Chromium (needs `npm run detector`) |
+| `npx tsx scripts/eval-guide.ts` | Live guide-extraction probe on synthetic instruction images (uses quota) |
+| `npx tsx scripts/live-guide-dialogue.ts` | Live typed conversation through a running server: guide tools end to end (uses quota) |
 | `npx tsx scripts/eval-label.ts` | Live label-reading probe on a synthetic packet image (uses API quota) |
 | `npm run verify` | typecheck + lint + test + build + secret scan |
 
@@ -150,6 +158,7 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
 | `GEMINI_API_KEY` | — | Server-side only. Missing → honest "not configured" state; the UI still loads. |
 | `LIVE_MODEL` | `gemini-3.8-live` | Live (native audio) model |
 | `VISION_MODEL` | `gemini-3.6-flash` | Label reading and snapshot answers (falls back to `LOCATE_MODEL` on timeout/5xx/429) |
+| `GUIDE_MODEL` / `GUIDE_FALLBACK_MODEL` | `gemini-3.5-flash-lite` / (same, paused retry) | Instruction-guide extraction |
 | `LOCATE_MODEL` | `gemini-3.5-flash-lite` | Fast model: find-mode boxes, label text-region pass, fallback reads |
 | `LIVE_VOICE` | `Kore` | Prebuilt voice |
 | `ASSISTANT_LANGUAGE` | `English` | Reply language; Sightline won't switch because of printed text or background speech |

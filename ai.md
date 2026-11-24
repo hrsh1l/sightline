@@ -36,6 +36,14 @@ contracts or dependencies; requests came back to the lead. Reports below are sum
 | Interface/accessibility | `src/client/App.tsx`, `src/client/ui/**`, `src/client/styles.css` | Mobile UI, controls, announcer, evidence panel, transcript, settings/diagnostics, overlay geometry, styles. 69 tests. |
 | Verification | `tests/**`, `playwright.config.ts`, `docs/test-results.md`, `docs/mobile-checklist.md` | Integration tests against the real server with FIXTURE providers, Chromium e2e with fake media, manual S25 checklist, test results. |
 
+### Later feature rounds (same session, same orchestration)
+
+| Round | Workers (Claude Code subagents, isolated worktrees) | Lead integration |
+|---|---|---|
+| v2 small print + boxes + find | detail-reading (camera stills, torch, two-pass crops, locate), find/spatial-audio, UI | found and fixed a live 400 (JSON schema "too many states"), 429 fallback |
+| v3 directional Find | server tracking/selection, client stereo beacon/calibration, UI | real-YOLO browser test harness (generated video from a COCO photo), shared AudioContext wiring |
+| v4 instruction companion | extraction/view assessment, guide state + tools + session, client controller + panel | fast guide model, fixed cut-off adjustments, edge-touch evidence, same-model retry, prompt fix, camera-start wait, live dialogue script |
+
 ### Human responsibilities
 
 The repository owner supplies the Gemini API key locally, connects the S25, runs the live/device checklist, and
