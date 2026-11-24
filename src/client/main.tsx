@@ -11,6 +11,8 @@ import { createSpatialCues } from './audio/SpatialCues.js';
 import { createSessionSocket } from './session/SessionSocket.js';
 import { createAssistantController } from './session/AssistantController.js';
 
+const player = createAudioPlayer();
+
 const controller = createAssistantController({
   camera: createCameraController(),
   // Live API accepts JPEG frames at up to 1 FPS; the sampler also enforces this floor.
@@ -21,10 +23,11 @@ const controller = createAssistantController({
       jpegQuality: LIMITS.liveFrameJpegQuality,
     }),
   mic: createMicCapture(),
-  player: createAudioPlayer(),
+  player,
   speech: createSpeechOutput(),
   // Earcons, find-mode aiming beeps and haptics.
-  spatial: createSpatialCues(),
+  // Cue sounds share the player's single AudioContext (no competing contexts on Android).
+  spatial: createSpatialCues({ getContext: () => player.context }),
   // Small frames (<= 640 px, <= 4 FPS) for the object detector / find tracking only; never sent to Gemini Live.
   createDetectSampler: (camera) =>
     createFrameSampler(camera, {

@@ -214,6 +214,8 @@ export interface SpatialCueEngine {
   setSuppressed(suppressed: boolean): void;
   /** Calibration: one tone hard left (-1), hard right (+1) or centre (0). Resolves when it has finished playing. */
   calibrationTone(channel: 'left' | 'right' | 'centre'): Promise<void>;
+  /** Stop a calibration tone immediately (cancel). */
+  cancelCalibrationTone?(): void;
   configure(opts: { earcons: boolean; beacon: boolean; haptics: boolean; volume: number }): void;
   /** performance.now() ms until which a cue is (or is scheduled to be) audible, incl. release tail. Used to blank mic input. */
   readonly audibleUntil: number;

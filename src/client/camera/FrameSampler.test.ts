@@ -144,12 +144,12 @@ describe('FrameSampler minIntervalMs (detection sampler)', () => {
     expect(effectiveIntervalMs({ intervalMs: Number.NaN, minIntervalMs: Number.NaN })).toBe(LIMITS.liveFrameMinIntervalMs);
   });
 
-  it('samples at 4 FPS when allowed, and is clamped to 250 ms when asked for faster', async () => {
+  it('samples at the detection rate when allowed, and is clamped to LIMITS.detectFrameMinIntervalMs when asked for faster', async () => {
     const { cam, capture, captureTimes } = fakeCamera();
     const s = createFrameSampler(cam, { intervalMs: 100, minIntervalMs: 50, maxDim: 640, jpegQuality: 0.6 }, { document: visible });
     s.start(() => {});
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(capture).toHaveBeenCalledTimes(5); // t = 0, 250, 500, 750, 1000
+    expect(capture).toHaveBeenCalledTimes(Math.floor(1_000 / LIMITS.detectFrameMinIntervalMs) + 1); // t = 0, 200, ..., 1000
     for (let i = 1; i < captureTimes.length; i++) expect(captureTimes[i]! - captureTimes[i - 1]!).toBeGreaterThanOrEqual(LIMITS.detectFrameMinIntervalMs);
     expect(capture.mock.calls[0]![0]).toEqual({ maxDim: 640, jpegQuality: 0.6 });
     s.stop();

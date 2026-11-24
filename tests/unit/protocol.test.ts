@@ -45,6 +45,7 @@ const validClient: Record<ClientMessage['type'], ClientMessage> = {
   'detect.frame': { type: 'detect.frame', frame },
   find: { type: 'find', requestId: 'find-1', query: 'salt' },
   'find.stop': { type: 'find.stop' },
+  'find.select': { type: 'find.select', candidateId: 2 },
   text: { type: 'text', requestId: 'text-1', text: 'What is this?', frame },
   action: { type: 'action', requestId: 'read_label-1', action: 'read_label', frame },
   'snapshot.result': { type: 'snapshot.result', requestId: 'snap-1', frame },
