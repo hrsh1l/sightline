@@ -20,7 +20,8 @@
     "check:secrets": "node scripts/check-client-secrets.mjs",
     "check:models": "tsx scripts/check-models.ts",
     "verify": "npm run typecheck && npm run lint && npm run build && npm test && npm run check:secrets",
-    "detector": "cd services/detector && uv run python server.py --port 8765"
+    "detector": "cd services/detector && uv run python server.py --port 8765",
+    "test:e2e:find": "playwright test -c playwright.find.config.ts"
   },
   "dependencies": {
     "@google/genai": "3.6.1",
