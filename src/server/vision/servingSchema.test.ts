@@ -3,12 +3,14 @@ import { hasServingConstraints, servingSchema } from './servingSchema.js';
 import { EXTRACTION_RESPONSE_SCHEMA } from './GeminiVision.js';
 import { REGION_RESPONSE_SCHEMA } from './detailRead.js';
 import { LOCATE_RESPONSE_SCHEMA } from './locate.js';
+import { GUIDE_RESPONSE_SCHEMA } from './guideExtract.js';
 
 describe('model-facing response schemas are servable (regression: live 400 "too many states")', () => {
   it.each([
     ['extraction', EXTRACTION_RESPONSE_SCHEMA],
     ['regions', REGION_RESPONSE_SCHEMA],
     ['locate', LOCATE_RESPONSE_SCHEMA],
+    ['guide', GUIDE_RESPONSE_SCHEMA],
   ])('%s schema has no size/range constraint keywords', (_name, schema) => {
     expect(hasServingConstraints(schema)).toBe(false);
   });
