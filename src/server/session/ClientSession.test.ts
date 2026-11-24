@@ -9,6 +9,7 @@ import { createMemoryLogger } from '../log.js';
 import type { ClientChannel, DetectorService, LiveConnector, LiveSessionLike, SessionDeps, VisionService } from '../contracts.js';
 import type { ClientMessage, FramePayload, LabelEvidence, ServerMessage } from '../../shared/protocol.js';
 import { createClientSessionWithOptions, type ClientSessionOptions } from './ClientSession.js';
+import { TOOL_NAMES } from '../live/tools.js';
 
 /** Provider message shape without the SDK class's convenience getters. */
 type LiveMsg = Omit<LiveServerMessage, 'text' | 'data'>;
@@ -107,6 +108,9 @@ function createFakeVision() {
     model: 'fake-vision',
     extractLabel: vi.fn(async ({ frame }: Parameters<VisionService['extractLabel']>[0]) => fakeEvidence(frame)),
     answer: vi.fn(async (_input: Parameters<VisionService['answer']>[0]) => ({ text: 'FIXTURE answer: a tin of tomatoes.', latencyMs: 12 })),
+    extractGuide: vi.fn(async (_input: Parameters<VisionService['extractGuide']>[0]): ReturnType<VisionService['extractGuide']> => {
+      throw new Error('FIXTURE: extractGuide not used in these tests');
+    }),
     locate: vi.fn(async (_input: Parameters<VisionService['locate']>[0]) => ({
       boxes: [] as { label: string; box: { x: number; y: number; w: number; h: number }; score: number }[],
       model: 'fake-locate',
@@ -281,7 +285,7 @@ describe('hello and credentials', () => {
     expect('enableAffectiveDialog' in cfg).toBe(false);
     expect('proactivity' in cfg).toBe(false);
     const tools = cfg.tools as { functionDeclarations: { name: string }[] }[];
-    expect(tools[0]!.functionDeclarations.map((f) => f.name)).toEqual(['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding']);
+    expect(tools[0]!.functionDeclarations.map((f) => f.name)).toEqual([...TOOL_NAMES]);
     expect(String(cfg.systemInstruction)).toContain('Monday 23 November 2026');
     expect(h.of('status').map((s) => s.state)).toEqual(['connecting', 'live']);
     expect(h.of('ready')[0]).toMatchObject({ mode: 'live', features: { live: true, snapshot: true }, models: { live: 'gemini-3.8-live' } });
