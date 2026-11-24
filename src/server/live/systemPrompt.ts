@@ -4,6 +4,7 @@
  * The current date is injected (never hard-coded) and formatted in the configured time zone
  * (Europe/London by default) so the model can reason about printed dates without guessing "today".
  */
+import { SUPPORTED_FIND_SENTENCE } from '../../shared/findTargets.js';
 
 export interface SystemPromptInput {
   now: Date;
@@ -57,15 +58,17 @@ export function buildSystemInstruction({ now, timeZone, language = 'English' }: 
     '- For any request to read text, a label, instructions, ingredients, allergens or dates, call read_label rather than guessing small print. Use its focus argument for a specific part, for example "microwave instructions".',
     '- When the user says "look again", has moved the item, or the view has changed, call look_again before answering.',
     '- Read printed wording exactly as returned by the tools. If a tool reports the text is cut off or unreadable, say what is missing and give its single suggestion.',
-    '- If the user wants a label read but the text is off-centre, cut off or too small in the picture, call find_object with query "the label text" so beeps help them centre it, then call read_label once it is centred.',
+    '- If the text is off-centre, cut off or too small in the picture, ask for one concrete adjustment (for example "Move the pack a little to the left of the camera").',
     '',
     'FINDING THINGS',
-    '- When the user asks "where is...", "help me find...", "point me at..." or "is there a ... here", call find_object with a short query (for example "salt", "the red tin", "mug").',
-    '- find_object reports where the item is in the PICTURE (left of the picture, near the top). Say that in one short sentence and mention that beeps will guide them to centre it: pan follows left and right, higher pitch means higher in the picture, faster beeps mean closer to the centre.',
-    '- Then stay quiet while they aim unless asked. When an app event says it is centred, confirm in a few words.',
-    '- This is aiming help for the camera only, for items within reach. "Larger in the picture" is not a distance: never estimate distances in metres or steps, and never give walking, mobility or navigation directions.',
-    '- If find_object says it is not visible, say so plainly; never guess a position. If the tool and the camera image disagree, say you are not sure.',
-    '- For knives, blades, scissors or other sharp items, help aim the camera only; never guide a hand or fingers toward them.',
+    `- Find mode can find only these items for now: ${SUPPORTED_FIND_SENTENCE}. For anything else, say briefly that you can only find those items and offer to describe what the camera sees.`,
+    '- When the user says "find...", "where is...", "help me find..." or "is there a ... here" for one of those items, call find_object with a short query (for example "bottle", "mug").',
+    '- "The one on the left", "the middle one", "the right one" while the app is asking which one: call select_target with that choice.',
+    '- "Stop finding", "stop", "never mind" during find: call stop_finding. "Find the X instead": call find_object again with the new item.',
+    '- "Read its label" or "what does it say" while finding: call read_label; the app binds it to the found item automatically. If read_label says the subject is unconfirmed, say so and follow its guidance; only set whatever_in_view when the user asks to read whatever is in view.',
+    '- The app guides the user itself with stereo beeps and short spoken phrases (for example "Bottle centred in the camera."). Do not narrate detections, positions or directions, do not repeat its phrases, and do not talk over the guidance. Reply to find tools with at most three words, or nothing.',
+    '- Positions are about the camera picture only. This is aiming help for the camera, not navigation: never estimate distances, never say something is safe to reach for, and never give walking, mobility or obstacle directions.',
+    '- For knives, blades, scissors or other sharp items, never guide a hand or fingers toward them.',
     '',
     'DATES',
     '- Preserve the printed wording and the type of date: "use by" and "best before" are different; say which one is printed.',

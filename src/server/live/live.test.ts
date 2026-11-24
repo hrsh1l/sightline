@@ -41,14 +41,16 @@ describe('systemPrompt', () => {
 });
 
 describe('tools', () => {
-  it('declares exactly read_label, look_again and find_object with JSON schemas', () => {
-    expect(functionDeclarations.map((d) => d.name)).toEqual(['read_label', 'look_again', 'find_object']);
-    for (const d of functionDeclarations) expect(d.parametersJsonSchema).toMatchObject({ type: 'object' });
+  it('declares exactly the five tools with JSON schemas', () => {
+    expect(functionDeclarations.map((d) => d.name)).toEqual(['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding']);
+    for (const d of functionDeclarations) expect(d.parametersJsonSchema).toMatchObject({ type: 'object', additionalProperties: false });
   });
 
   it('validates arguments and rejects unknown tools', () => {
-    expect(parseToolCall('read_label', { focus: 'allergens' })).toEqual({ ok: true, name: 'read_label', args: { focus: 'allergens' } });
-    expect(parseToolCall('read_label', undefined)).toEqual({ ok: true, name: 'read_label', args: { focus: undefined } });
+    expect(parseToolCall('read_label', { focus: 'allergens' })).toEqual({ ok: true, name: 'read_label', args: { focus: 'allergens', whateverInView: false } });
+    expect(parseToolCall('read_label', undefined)).toEqual({ ok: true, name: 'read_label', args: { focus: undefined, whateverInView: false } });
+    expect(parseToolCall('read_label', { whatever_in_view: true })).toEqual({ ok: true, name: 'read_label', args: { focus: undefined, whateverInView: true } });
+    expect(parseToolCall('read_label', { whatever_in_view: 'yes' })).toMatchObject({ ok: false, error: 'invalid_arguments' });
     expect(parseToolCall('read_label', { focus: 42 })).toMatchObject({ ok: false, error: 'invalid_arguments' });
     expect(parseToolCall('read_label', { focus: 'x'.repeat(500) })).toMatchObject({ ok: false });
     expect(parseToolCall('run_shell', { cmd: 'rm -rf /' })).toMatchObject({ ok: false, error: 'unknown_tool' });
@@ -56,22 +58,40 @@ describe('tools', () => {
   });
 
   it('find_object requires a short query string', () => {
-    expect(parseToolCall('find_object', { query: '  the salt ' })).toEqual({ ok: true, name: 'find_object', args: { query: 'the salt' } });
+    expect(parseToolCall('find_object', { query: '  the bottle ' })).toEqual({ ok: true, name: 'find_object', args: { query: 'the bottle' } });
     expect(parseToolCall('find_object', {})).toMatchObject({ ok: false, error: 'invalid_arguments' });
     expect(parseToolCall('find_object', { query: '' })).toMatchObject({ ok: false, error: 'invalid_arguments' });
     expect(parseToolCall('find_object', { query: 'x'.repeat(81) })).toMatchObject({ ok: false, error: 'invalid_arguments' });
     const decl = functionDeclarations.find((d) => d.name === 'find_object')!;
     expect(decl.parametersJsonSchema).toMatchObject({ required: ['query'] });
-    expect(decl.description).toMatch(/image-relative/i);
+    expect(decl.description).toContain('cups or mugs, bottles, bowls, apples and bananas');
+    expect(decl.description).toMatch(/camera picture only/);
   });
 
-  it('the system prompt explains find_object with image-relative framing', () => {
+  it('select_target needs left/middle/right; stop_finding takes nothing', () => {
+    for (const choice of ['left', 'middle', 'right'] as const) {
+      expect(parseToolCall('select_target', { choice })).toEqual({ ok: true, name: 'select_target', args: { choice } });
+    }
+    for (const bad of [{}, { choice: 'top' }, { choice: 1 }, undefined]) {
+      expect(parseToolCall('select_target', bad)).toMatchObject({ ok: false, error: 'invalid_arguments' });
+    }
+    expect(parseToolCall('stop_finding', {})).toEqual({ ok: true, name: 'stop_finding', args: {} });
+    expect(parseToolCall('stop_finding', undefined)).toEqual({ ok: true, name: 'stop_finding', args: {} });
+    expect(parseToolCall('stop_finding', 'x')).toMatchObject({ ok: false, error: 'invalid_arguments' });
+  });
+
+  it('the system prompt explains find with the supported list and camera-only framing', () => {
     const text = buildSystemInstruction({ now: new Date('2026-11-23T12:00:00Z'), timeZone: 'Europe/London' });
-    expect(text).toContain('find_object');
-    expect(text).toContain('"the label text"');
-    expect(text).toMatch(/never give walking, mobility or navigation directions/);
+    for (const needle of ['find_object', 'select_target', 'stop_finding', 'read_label', 'cups or mugs, bottles, bowls, apples and bananas']) {
+      expect(text).toContain(needle);
+    }
+    expect(text).not.toContain('"the label text"');
+    expect(text).not.toMatch(/app event says it is centred/);
+    expect(text).toMatch(/Do not narrate detections, positions or directions/);
+    expect(text).toMatch(/never give walking, mobility or obstacle directions/);
     expect(text).toMatch(/never estimate distances/);
-    expect(text).toMatch(/sharp items, help aim the camera only/);
+    expect(text).toMatch(/never say something is safe to reach for/);
+    expect(text).toMatch(/sharp items, never guide a hand/);
   });
 
   it('compactEvidence omits model metadata and includes guidance', () => {

@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import type { Detection } from './protocol.js';
+import { findTargetByCoco } from './findTargets.js';
 import {
+  centerDistance,
+  centerError,
+  FIND_PROMPT_TEXT,
+  inCenterZone,
+  positionsLeftToRight,
   COCO_CLASSES,
   cocoLabelFor,
   cocoMatch,
@@ -117,5 +123,58 @@ describe('pickTarget', () => {
     const ds = [det('salt shaker', 0.9, 0.1, 0.1), det('pepper', 0.1, 0.5, 0.5)];
     expect(pickTarget(ds, 'salt', null, { anyLabel: true })).toBe(ds[0]);
     expect(pickTarget([ds[1]!], 'pepper', null, { anyLabel: true })).toBeNull();
+  });
+});
+
+describe('directional find helpers', () => {
+  const b = (cx: number, cy: number, s = 0.1) => ({ x: cx - s / 2, y: cy - s / 2, w: s, h: s });
+
+  it('centre zones and errors use the unmirrored box centre on both axes', () => {
+    expect(centerError(b(0.6, 0.3)).dx).toBeCloseTo(0.1);
+    expect(centerError(b(0.6, 0.3)).dy).toBeCloseTo(-0.2);
+    expect(inCenterZone(b(0.58, 0.6), { x: 0.08, y: 0.1 })).toBe(true);
+    expect(inCenterZone(b(0.59, 0.5), { x: 0.08, y: 0.1 })).toBe(false);
+    expect(inCenterZone(b(0.5, 0.61), { x: 0.08, y: 0.1 })).toBe(false);
+    expect(centerDistance(b(0.2, 0.5), b(0.5, 0.9))).toBeCloseTo(0.5);
+  });
+
+  it('positions left -> right: 2, 3, 4 candidates and a single one by third', () => {
+    expect(positionsLeftToRight([b(0.2, 0.5), b(0.4, 0.5)])).toEqual(['left', 'right']);
+    expect(positionsLeftToRight([b(0.2, 0.5), b(0.4, 0.5), b(0.9, 0.5)])).toEqual(['left', 'middle', 'right']);
+    expect(positionsLeftToRight([b(0.1, 0.5), b(0.3, 0.5), b(0.6, 0.5), b(0.9, 0.5)])).toEqual(['left', 'middle', 'middle', 'right']);
+    expect(positionsLeftToRight([b(0.7, 0.5)])).toEqual(['right']);
+    expect(positionsLeftToRight([b(0.5, 0.5)])).toEqual(['middle']);
+    expect(positionsLeftToRight([])).toEqual([]);
+  });
+
+  it('describePosition follows an explicit centred decision', () => {
+    expect(describePosition(b(0.6, 0.5), false)).toBe('middle of the picture, small');
+    expect(describePosition(b(0.62, 0.5), true)).toBe('in the centre of the picture, small');
+  });
+
+  it('prompt texts are app-generated, image-relative and never about distance or reaching', () => {
+    const cup = findTargetByCoco('cup')!;
+    const apple = findTargetByCoco('apple')!;
+    expect(FIND_PROMPT_TEXT.select(cup, 2)).toBe('I see two cups. The left one or the right one?');
+    expect(FIND_PROMPT_TEXT.select(findTargetByCoco('bowl')!, 3)).toBe('I see three bowls. The left, middle or right one?');
+    expect(FIND_PROMPT_TEXT.centred(findTargetByCoco('bottle')!)).toBe('Bottle centred in the camera.');
+    expect(FIND_PROMPT_TEXT.notSeen(apple)).toBe("I don't see an apple yet. Slowly scan the camera across the table.");
+    expect(FIND_PROMPT_TEXT.lost(cup)).toBe("I've lost the cup. Move the camera back slowly.");
+    expect(FIND_PROMPT_TEXT.reselect(cup, ['left', 'middle', 'right'])).toBe('I see more than one cup now. The left, middle or right one?');
+    expect(FIND_PROMPT_TEXT.unsupported()).toBe("I can only find cups or mugs, bottles, bowls, apples and bananas for now. You can still ask me what's in view.");
+    const all = [
+      FIND_PROMPT_TEXT.foundAuto(cup),
+      FIND_PROMPT_TEXT.foundChosen(cup, 'left'),
+      FIND_PROMPT_TEXT.reselect(cup, ['right']),
+      FIND_PROMPT_TEXT.tiltUp(),
+      FIND_PROMPT_TEXT.tiltDown(),
+      FIND_PROMPT_TEXT.timeout(cup),
+      FIND_PROMPT_TEXT.detectorError(),
+      FIND_PROMPT_TEXT.cameraError(),
+    ];
+    for (const t of all) {
+      expect(t.length).toBeLessThanOrEqual(200);
+      expect(t).not.toMatch(/metre|meter|feet|step|walk|reach|grab|safe|close to you|away from you/i);
+    }
   });
 });
