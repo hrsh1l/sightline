@@ -1056,7 +1056,27 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
    * falling back to a normal high-res capture. A soft tick says "hold still"; the shutter cue + haptic mark the
    * moment the photo is taken.
    */
+  /**
+   * If the camera is still starting (permission prompt / getUserMedia in flight), wait for it briefly instead of
+   * failing: users tap "Guide me" or "Read label" right after Start. Denied/failed cameras return at once.
+   */
+  async function waitForCameraStarting(maxMs = 5_000): Promise<void> {
+    if (camera.getState().status !== 'requesting') return;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(done, maxMs);
+      const unsub = camera.subscribe(() => {
+        if (camera.getState().status !== 'requesting') done();
+      });
+      function done() {
+        clearTimeout(timer);
+        unsub();
+        resolve();
+      }
+    });
+  }
+
   async function captureLabelStill(): Promise<CapturedFrame | null> {
+    await waitForCameraStarting();
     cue('listening');
     let frame: CapturedFrame | null = null;
     if (typeof camera.captureStill === 'function') {

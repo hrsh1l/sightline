@@ -77,7 +77,7 @@ function stats() {
       audioMimes: [...new Set(s.audio.map((a) => a.params.audio?.mimeType ?? null))],
       audioStreamEnds: s.realtime.filter((r) => r.params.audioStreamEnd).length,
       texts: s.texts.map((t) => t.params.text),
-      clientContent: s.clientContent.map((c) => JSON.stringify(c.params.turns).slice(0, 300)),
+      clientContent: s.clientContent.map((c) => JSON.stringify(c.params.turns).slice(0, 4_000)),
       toolResponses: s.toolResponses.map((t) => JSON.stringify(t.params.functionResponses).slice(0, 2_000)),
     })),
     vision: {

@@ -103,6 +103,6 @@ for (const name of which) {
     if (replaced) console.info(`   spoken replaced by source text for ${replaced} step(s)`);
   } catch (err) {
     console.error(`\n== ${name}: FAILED after ${Math.round(performance.now() - t0)} ms: ${err instanceof Error ? err.message : String(err)}`);
-    console.error(`   log: ${JSON.stringify(log.events.slice(-3))}`);
+    console.error(`   log: ${JSON.stringify(log.events)}`);
   }
 }

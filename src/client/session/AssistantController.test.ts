@@ -1866,3 +1866,17 @@ describe('guide: speech', () => {
     expect(h.speech.speak).not.toHaveBeenCalled();
   });
 });
+
+describe('camera still starting when a read/guide is requested (regression: e2e 2026-11-24)', () => {
+  it('waits for the camera to finish starting instead of reporting it unavailable', async () => {
+    const h = await started();
+    h.camera.set({ status: 'requesting' });
+    const p = h.controller.guideInspect('instructions');
+    await Promise.resolve();
+    expect(h.camera.capture).not.toHaveBeenCalled();
+    h.camera.set({ status: 'active', videoWidth: 640, videoHeight: 480 });
+    await p;
+    expect(h.socket.sent.some((m) => m.type === 'guide.inspect')).toBe(true);
+    expect(h.controller.getState().error).toBeNull();
+  });
+});
