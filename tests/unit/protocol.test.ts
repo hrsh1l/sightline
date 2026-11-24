@@ -14,6 +14,7 @@ import {
   type FramePayload,
   type LabelEvidence,
 } from '../../src/shared/protocol.js';
+import { IDLE_GUIDE } from '../../src/shared/guide.js';
 
 const frame: FramePayload = { frameId: 3, capturedAt: 1_795_000_000_000, width: 640, height: 480, mimeType: 'image/jpeg', data: 'AAAA' };
 const evidence: LabelEvidence = {
@@ -46,6 +47,8 @@ const validClient: Record<ClientMessage['type'], ClientMessage> = {
   find: { type: 'find', requestId: 'find-1', query: 'salt' },
   'find.stop': { type: 'find.stop' },
   'find.select': { type: 'find.select', candidateId: 2 },
+  'guide.inspect': { type: 'guide.inspect', requestId: 'guide-1', goal: 'cooking instructions', frame },
+  'guide.action': { type: 'guide.action', requestId: 'guide-2', action: 'confirm', guideId: 'g1', revision: 1, stepId: 'microwave-s1' },
   text: { type: 'text', requestId: 'text-1', text: 'What is this?', frame },
   action: { type: 'action', requestId: 'read_label-1', action: 'read_label', frame },
   'snapshot.result': { type: 'snapshot.result', requestId: 'snap-1', frame },
@@ -68,6 +71,7 @@ const validServer: Record<ServerMessage['type'], ServerMessage> = {
     timeZone: 'Europe/London',
   },
   status: { type: 'status', state: 'reconnecting', detail: 'connection lost' },
+  guide: { type: 'guide', guide: IDLE_GUIDE, requestId: null, result: null },
   find: {
     type: 'find',
     requestId: 'find-1',
