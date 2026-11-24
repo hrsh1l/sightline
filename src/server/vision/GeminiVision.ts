@@ -8,6 +8,11 @@
  *    text regions on a <= 1536 px overview, the regions are cropped from the full-resolution frame, and pass 2
  *    reads overview (HIGH) + crops (ULTRA_HIGH) together. If pass 1 fails or finds nothing, the whole frame is read
  *    in one call (ULTRA_HIGH when >= 1600 px).
+ *  - extractGuide (instruction companion): same pipeline shape with guide prompts: pass 1 (fast model) finds the
+ *    instruction blocks relevant to the goal, crops at native resolution, then ONE extraction call (overview HIGH +
+ *    crops ULTRA_HIGH, or the whole frame when small / pass 1 unavailable) returning a view assessment and ordered,
+ *    source-grounded steps per section. Normalised in guideExtract.ts (caps, ids, spoken faithfulness checks).
+ *    Calls per inspect: 1-2 normally, 3 with the fast-model retry. Worst case 6 + 14 + 10 = 30 s by default.
  *  - answer: one frame + question (+ short history) -> plain text suitable for TTS.
  *  - locate: find-mode boxes for one queried item, on the fast model (config.locateModel).
  *  - Resilience: a read/answer that fails transiently on config.visionModel (timeout, 5xx, unreachable, model
@@ -41,7 +46,9 @@ import {
   planCrops,
   type DecodedImage,
   type EncodedImage,
+  type RegionKind,
 } from './detailRead.js';
+import { GUIDE_RESPONSE_SCHEMA, ModelGuide, buildGuideExtraction, guideRegionLabel } from './guideExtract.js';
 import { LOCATE, LOCATE_RESPONSE_SCHEMA, parseLocateOutput } from './locate.js';
 import {
   buildAnswerInstruction,
@@ -50,11 +57,19 @@ import {
   buildDetailUserText,
   buildExtractionInstruction,
   buildExtractionUserText,
+  buildGuideDetailInstruction,
+  buildGuideDetailUserText,
+  buildGuideInstruction,
+  buildGuideRegionInstruction,
+  buildGuideRegionUserText,
+  buildGuideUserText,
   buildLocateInstruction,
   buildLocateUserText,
   buildRegionInstruction,
   buildRegionUserText,
+  clipGoal,
 } from './prompts.js';
+import { GUIDE_LIMITS } from '../../shared/guide.js';
 import { servingSchema } from './servingSchema.js';
 
 /** Minimal structural view of GoogleGenAI used here, so tests can inject a FIXTURE fake. */
@@ -79,6 +94,13 @@ export interface GeminiVisionOptions {
   locateTimeoutMs?: number;
   /** The single retry on the fast model after a transient vision-model failure. */
   fallbackTimeoutMs?: number;
+  /**
+   * Guide extraction (instruction companion). Its output is longer than a label read, so it has its own timeouts:
+   * worst case regionTimeoutMs + guideTimeoutMs + guideFallbackTimeoutMs (6 + 14 + 10 = 30 s by default).
+   */
+  guideTimeoutMs?: number;
+  guideFallbackTimeoutMs?: number;
+  guideThinking?: ThinkingLevel | null;
   /** Thinking levels; null = do not send thinkingConfig. */
   extractThinking?: ThinkingLevel | null;
   /** Detail pass 2 (overview + crops) on the vision model. */
@@ -146,12 +168,16 @@ const DEFAULTS = {
   answerThinking: ThinkingLevel.MINIMAL,
   locateThinking: ThinkingLevel.MINIMAL,
   fallbackThinking: ThinkingLevel.LOW,
+  guideTimeoutMs: 14_000,
+  guideFallbackTimeoutMs: 10_000,
+  guideThinking: ThinkingLevel.MEDIUM,
   twoPass: true,
 } as const;
 
 /** maxOutputTokens: thinking tokens count against this budget, so keep it generous (an empty reply otherwise). */
 const MAX_OUTPUT_TOKENS = {
   extract: 16_384,
+  guide: 16_384,
   regions: 4_096,
   locate: LOCATE.maxOutputTokens,
   answer: 2_048,
@@ -365,7 +391,7 @@ function historyContents(history: ConversationTurn[]): Content[] {
 // Service
 // ---------------------------------------------------------------------------
 
-type Op = 'extract' | 'regions' | 'answer' | 'locate';
+type Op = 'extract' | 'regions' | 'answer' | 'locate' | 'guide';
 
 interface GenParams {
   contents: Content[];
@@ -537,11 +563,32 @@ export function createGeminiVision(deps: {
     };
   }
 
+  interface DetailCrops {
+    overview: EncodedImage;
+    crops: { image: EncodedImage; kind: RegionKind }[];
+  }
+
+  /** Pass-2 parts: intro text, overview (HIGH), then caption + crop (ULTRA_HIGH) for each crop. */
+  function detailParts(intro: string, d: DetailCrops, label: (kind: RegionKind) => string): Part[] {
+    const parts: Part[] = [{ text: intro }, imagePart(d.overview.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH)];
+    d.crops.forEach((c, i) => {
+      parts.push({ text: buildCropCaption(i + 1, d.crops.length, label(c.kind)) });
+      parts.push(imagePart(c.image.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH));
+    });
+    return parts;
+  }
+
   /**
-   * Detail pass 1 + crops. Returns the pass-2 request, or null when the single-pass read should be used instead
-   * (meta.detailSkipped says why). Throws only on caller abort or rejected credentials.
+   * Detail pass 1 (fast model, the given region prompt) + crops from the full-resolution frame. Returns the overview
+   * and crops, or null when the single-pass read should be used instead (meta.detailSkipped says why). Throws only on
+   * caller abort or rejected credentials.
    */
-  async function prepareDetailRead(frame: FramePayload, focus: string | undefined, now: Date, signal: AbortSignal | undefined, meta: ExtractMeta): Promise<ReadRequest | null> {
+  async function prepareDetailCrops(
+    frame: FramePayload,
+    regionPrompt: { system: string; user: string },
+    signal: AbortSignal | undefined,
+    meta: ExtractMeta,
+  ): Promise<DetailCrops | null> {
     let decoded: DecodedImage;
     let overview: EncodedImage;
     try {
@@ -569,9 +616,9 @@ export function createGeminiVision(deps: {
           'regions',
           fastModel,
           {
-            contents: [{ role: 'user', parts: [{ text: buildRegionUserText(focus) }, imagePart(overview.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH)] }],
+            contents: [{ role: 'user', parts: [{ text: regionPrompt.user }, imagePart(overview.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH)] }],
             config: {
-              systemInstruction: buildRegionInstruction(),
+              systemInstruction: regionPrompt.system,
               responseMimeType: 'application/json',
               responseJsonSchema: REGION_RESPONSE_SCHEMA,
               maxOutputTokens: MAX_OUTPUT_TOKENS.regions,
@@ -598,7 +645,7 @@ export function createGeminiVision(deps: {
 
     // Crops from the full-resolution frame, within the inline request budget.
     let budget = DETAIL.maxInlineBase64Chars - overview.data.length;
-    const crops: { image: EncodedImage; kind: (typeof planned)[number]['kind'] }[] = [];
+    const crops: DetailCrops['crops'] = [];
     try {
       for (const p of planned) {
         signal?.throwIfAborted();
@@ -619,15 +666,24 @@ export function createGeminiVision(deps: {
     }
     meta.crops = crops.length;
     meta.cropPx = crops.map((c) => `${c.image.width}x${c.image.height}`).join(' ');
-
-    // Pass 2 request: overview (HIGH) then each caption + crop (ULTRA_HIGH).
-    const parts: Part[] = [{ text: buildDetailUserText(focus, crops.length) }, imagePart(overview.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_HIGH)];
-    crops.forEach((c, i) => {
-      parts.push({ text: buildCropCaption(i + 1, crops.length, REGION_KIND_LABEL[c.kind]) });
-      parts.push(imagePart(c.image.data, PartMediaResolutionLevel.MEDIA_RESOLUTION_ULTRA_HIGH));
-    });
-    return { parts, systemInstruction: buildDetailExtractionInstruction(now, config.timeZone), thinking: opts.detailThinking };
+    return { overview, crops };
   }
+
+  const newMeta = (): ExtractMeta => ({
+    passes: 0,
+    regions: 0,
+    crops: 0,
+    cropPx: '',
+    overviewPx: '',
+    pass1Ms: null,
+    readMs: null,
+    detailSkipped: null,
+    modelFallback: null,
+    imageChars: 0,
+    outputChars: 0,
+  });
+
+  const wantsDetail = (frame: FramePayload) => opts.twoPass && Math.max(frame.width, frame.height) >= DETAIL.minTwoPassSide;
 
   return {
     model,
@@ -635,22 +691,16 @@ export function createGeminiVision(deps: {
     async extractLabel({ frame, focus, now, signal }) {
       const started = performance.now();
       const f = focus?.slice(0, CAP.focusChars);
-      const meta: ExtractMeta = {
-        passes: 0,
-        regions: 0,
-        crops: 0,
-        cropPx: '',
-        overviewPx: '',
-        pass1Ms: null,
-        readMs: null,
-        detailSkipped: null,
-        modelFallback: null,
-        imageChars: 0,
-        outputChars: 0,
-      };
+      const meta = newMeta();
 
-      const detail = opts.twoPass && Math.max(frame.width, frame.height) >= DETAIL.minTwoPassSide ? await prepareDetailRead(frame, f, now, signal, meta) : null;
-      const request = detail ?? singlePassRequest(frame, f, now);
+      const detail = wantsDetail(frame) ? await prepareDetailCrops(frame, { system: buildRegionInstruction(), user: buildRegionUserText(f) }, signal, meta) : null;
+      const request: ReadRequest = detail
+        ? {
+            parts: detailParts(buildDetailUserText(f, detail.crops.length), detail, (k) => REGION_KIND_LABEL[k]),
+            systemInstruction: buildDetailExtractionInstruction(now, config.timeZone),
+            thinking: opts.detailThinking,
+          }
+        : singlePassRequest(frame, f, now);
       meta.imageChars = request.parts.reduce((n, p) => n + (p.inlineData?.data?.length ?? 0), 0);
 
       const t2 = performance.now();
@@ -715,6 +765,91 @@ export function createGeminiVision(deps: {
         issues: evidence.issues.length,
       });
       return evidence;
+    },
+
+    async extractGuide({ frame, goal, signal }) {
+      const started = performance.now();
+      const g = clipGoal(goal, GUIDE_LIMITS.maxGoalChars);
+      const meta = newMeta();
+
+      const detail = wantsDetail(frame) ? await prepareDetailCrops(frame, { system: buildGuideRegionInstruction(), user: buildGuideRegionUserText(g) }, signal, meta) : null;
+      // Text before the image(s); the goal is untrusted and only ever appears in the user turn.
+      const parts: Part[] = detail
+        ? detailParts(buildGuideDetailUserText(g, detail.crops.length), detail, guideRegionLabel)
+        : [{ text: buildGuideUserText(g) }, imagePart(frame.data, mediaLevelFor(frame))];
+      const systemInstruction = detail ? buildGuideDetailInstruction() : buildGuideInstruction();
+      meta.imageChars = parts.reduce((n, p) => n + (p.inlineData?.data?.length ?? 0), 0);
+
+      const t2 = performance.now();
+      const { value: raw, usedModel } = await withModelFallback(
+        'guide',
+        signal,
+        async (callModel, isFallback) => {
+          meta.passes++;
+          const { json, outputChars } = await generateJson(
+            'guide',
+            callModel,
+            {
+              contents: [{ role: 'user', parts }],
+              config: {
+                systemInstruction,
+                responseMimeType: 'application/json',
+                responseJsonSchema: GUIDE_RESPONSE_SCHEMA,
+                maxOutputTokens: MAX_OUTPUT_TOKENS.guide,
+              },
+            },
+            isFallback ? opts.fallbackThinking : opts.guideThinking,
+            isFallback ? opts.guideFallbackTimeoutMs : opts.guideTimeoutMs,
+            signal,
+          );
+          meta.outputChars = outputChars;
+          const parsed = ModelGuide.safeParse(json);
+          if (!parsed.success) throw invalidOutput('guide', callModel, 'schema', outputChars, 'The vision model returned output in an unexpected shape.');
+          return parsed.data;
+        },
+        (reason) => (meta.modelFallback = reason),
+      );
+      meta.readMs = Math.round(performance.now() - t2);
+
+      let built: ReturnType<typeof buildGuideExtraction>;
+      try {
+        built = buildGuideExtraction(raw, { frame, model: usedModel, latencyMs: performance.now() - started });
+      } catch {
+        log.warn('vision_error', { op: 'guide', model: usedModel, code: 'invalid_output', reason: 'guide' });
+        throw new VisionError('The vision model returned output that could not be used.', 'invalid_output');
+      }
+      const { extraction, stats, replacements } = built;
+      for (const r of replacements) {
+        log.warn('vision_guide_spoken_replaced', { sectionIndex: r.sectionIndex, n: r.n, extraCount: r.extraCount, droppedCount: r.droppedCount });
+      }
+      log.info('vision_guide', {
+        model: usedModel,
+        latencyMs: extraction.latencyMs,
+        passes: meta.passes,
+        mode: detail ? 'detail' : 'single',
+        detailSkipped: meta.detailSkipped,
+        modelFallback: meta.modelFallback,
+        regions: meta.regions,
+        crops: meta.crops,
+        cropPx: meta.cropPx,
+        overviewPx: meta.overviewPx,
+        pass1Ms: meta.pass1Ms,
+        readMs: meta.readMs,
+        imageChars: meta.imageChars,
+        width: frame.width,
+        height: frame.height,
+        outputChars: meta.outputChars,
+        readability: extraction.readability,
+        issue: extraction.issue,
+        issueAdjusted: stats.issueAdjusted,
+        sections: stats.sections,
+        steps: stats.steps,
+        incompleteSections: stats.incompleteSections,
+        spokenReplaced: stats.spokenReplaced,
+        quantitiesDropped: stats.quantitiesDropped,
+        renumberedSections: stats.renumberedSections,
+      });
+      return extraction;
     },
 
     async answer({ frame, question, history, now, signal }) {
