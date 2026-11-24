@@ -11,6 +11,8 @@
 import type {
   ClientSettings,
   ErrorCode,
+  FindCandidate,
+  FindPromptKind,
   FindState,
   FramePayload,
   LabelEvidence,
@@ -169,39 +171,52 @@ export interface AudioPlayer extends Store<PlayerState> {
   flush(turnId?: number): void;
   /** Wall-clock (performance.now()) of the first audible sample of a turn, for latency metrics. */
   onTurnAudible(cb: (turnId: number, at: number) => void): Unsubscribe;
+  /** The app's single output AudioContext (null before unlock). Cue sounds share it to avoid competing contexts. */
+  readonly context: AudioContext | null;
   close(): Promise<void>;
 }
 
-/** Image-relative target for spatial cues (normalised to the camera picture, not physical space). */
+/** Image-relative target for the find beacon (normalised to the unmirrored rear-camera picture). */
 export interface CueTarget {
-  /** Box centre, 0..1 from left / top of the picture. */
+  /** Box centre, 0..1 from left / top of the picture. pan = clamp(2*cx - 1, -1, 1). */
   cx: number;
   cy: number;
-  /** Box area as a fraction of the picture, 0..1 (bigger = fills more of the picture). */
+  /** Box area as a fraction of the picture, 0..1. Not used as distance. */
   area: number;
+  /** Stably centred (server dwell + hysteresis). The beacon stops pulsing when true. */
   centered: boolean;
+  /** Client-clock capture time of the observation. Older than LIMITS.findObservationMaxAgeMs = no cue. */
+  observedAt: number;
 }
 
 export type Earcon = 'session_start' | 'session_end' | 'listening' | 'capture' | 'working' | 'found' | 'lost' | 'error';
 
 /**
- * Non-speech audio + haptic feedback. Stereo panning works best with headphones (the S25's two speakers are only
- * left/right in landscape), so pitch also encodes vertical position and beep rate encodes how centred the target is.
+ * Non-speech audio + haptics, sharing the AudioPlayer's AudioContext.
+ * Beacon: short gentle tone -> gain envelope (attack/release) -> StereoPannerNode (smoothed with setTargetAtTime)
+ * -> output. Pulse interval goes from LIMITS.findPulseFarMs (far from centre) to LIMITS.findPulseNearMs (near
+ * centre) and represents alignment, never distance. No pitch language in v1.
  */
 export interface SpatialCueEngine {
   readonly supported: boolean;
-  /** Create/resume its AudioContext. MUST be called synchronously inside a user gesture handler. */
+  /** Attach to / resume the shared AudioContext. MUST be called synchronously inside a user gesture handler. */
   unlock(): Promise<void>;
-  /** Continuous aiming cue. null = no target (silence after a short "lost" cue). */
+  /** Latest observation; null = no target (pulses stop immediately). Stale observations are ignored. */
   setTarget(target: CueTarget | null): void;
-  /** Start/stop the continuous aiming cue loop (find mode). */
+  /** Start/stop the beacon loop. stopTracking cancels every scheduled pulse immediately. */
   startTracking(): void;
   stopTracking(): void;
   /** One-shot event sound (and matching vibration if haptics enabled). */
   earcon(kind: Earcon): void;
-  /** Lower cue volume while the assistant speaks. */
+  /** Lower volume (e.g. screen reader likely speaking). */
   setDucked(ducked: boolean): void;
-  configure(opts: { earcons: boolean; spatial: boolean; haptics: boolean; headphones: boolean }): void;
+  /** Silence pulses entirely while true (assistant speech, guidance speech, user speech). Resumes after. */
+  setSuppressed(suppressed: boolean): void;
+  /** Calibration: one tone hard left (-1), hard right (+1) or centre (0). Resolves when it has finished playing. */
+  calibrationTone(channel: 'left' | 'right' | 'centre'): Promise<void>;
+  configure(opts: { earcons: boolean; beacon: boolean; haptics: boolean; volume: number }): void;
+  /** performance.now() ms until which a cue is (or is scheduled to be) audible, incl. release tail. Used to blank mic input. */
+  readonly audibleUntil: number;
   close(): Promise<void>;
 }
 
@@ -266,6 +281,23 @@ export interface FindStatus {
   description: string | null;
   /** Client epoch ms of the last update. */
   updatedAt: number;
+  trackId: number | null;
+  /** Client-clock capture time of the latest observation of the target, or null. */
+  observedAt: number | null;
+  /** Choices in needs_selection (empty otherwise). */
+  candidates: FindCandidate[];
+  /** Last app-generated prompt (also spoken unless muted). */
+  lastPrompt: { kind: FindPromptKind; text: string } | null;
+}
+
+export type CalibrationStep = 'idle' | 'left' | 'right' | 'centre' | 'confirm' | 'done';
+
+export interface CalibrationState {
+  step: CalibrationStep;
+  /** null until answered. false = user did not hear the expected left/right separation. */
+  heardSeparation: boolean | null;
+  /** Whether the microphone was active during the test (Bluetooth routing may differ when it is). */
+  micActive: boolean;
 }
 
 export interface AssistantSettings extends ClientSettings {
@@ -279,12 +311,19 @@ export interface AssistantSettings extends ClientSettings {
   showDiagnostics: boolean;
   /** Short non-speech sounds for events (capture, found, lost...). */
   earcons: boolean;
-  /** Continuous aiming beeps in find mode (pan = left/right in the picture, pitch = up/down, rate = how centred). */
+  /** Find-mode stereo beacon (left/right in the picture -> left/right ear; faster = better aligned). */
   spatialAudio: boolean;
   /** Vibration patterns (Android Chrome) for capture / centred / found. */
   haptics: boolean;
-  /** Use 3D (HRTF) panning tuned for headphones instead of simple stereo panning. */
-  headphones: boolean;
+  /** Cue volume 0..1 (beacon + earcons). */
+  cueVolume: number;
+  /** 'stereo': panned beacon + occasional spoken tilt prompts. 'spoken': spoken left/right/up/down instead of panning. */
+  guidanceMode: 'stereo' | 'spoken';
+  /**
+   * 'keep': microphone stays open during Find (barge-in works; Bluetooth earbuds may switch to mono call audio).
+   * 'release': microphone is released while Find runs (better chance of stereo on Bluetooth); hold Talk to speak.
+   */
+  findMicPolicy: 'keep' | 'release';
 }
 
 export interface Metrics {
@@ -297,6 +336,10 @@ export interface Metrics {
   framesSent: number;
   framesDropped: number;
   reconnects: number;
+  /** Latest detection result: arrival time minus its frame's capture time (both client clock), ms. */
+  detectionAgeMs: number | null;
+  /** Detection results received in the last ~5 s, per second. */
+  detectionRate: number | null;
 }
 
 export interface ServerInfo {
@@ -326,6 +369,7 @@ export interface AssistantState {
   detections: ServerDetections | null;
   /** Active find mode, or null. */
   find: FindStatus | null;
+  calibration: CalibrationState;
   error: AppError | null;
   announcement: Announcement | null;
   settings: AssistantSettings;
@@ -347,7 +391,13 @@ export interface AssistantController extends Store<AssistantState> {
   /** Start find mode for an item ("salt", "the red tin"). Image-relative aiming help only. */
   find(query: string): Promise<void>;
   stopFind(): void;
+  /** Choose a candidate in needs_selection. */
+  selectTarget(candidateId: number): void;
   setTorch(on: boolean): Promise<void>;
+  /** User-initiated stereo check: left tone, right tone, centre tone, then confirm. Call from a tap. */
+  startCalibration(): Promise<void>;
+  answerCalibration(heardSeparation: boolean): void;
+  cancelCalibration(): void;
   lookAgain(): Promise<void>;
   repeat(): void;
   sendText(text: string): Promise<void>;

@@ -51,6 +51,19 @@ export const LIMITS = {
   locateMinIntervalMs: 1_200,
   /** Find mode stops automatically after this long. */
   findTimeoutMs: 90_000,
+  /** Client: no aiming cue is played from an observation whose frame was captured longer ago than this. */
+  findObservationMaxAgeMs: 700,
+  /** Fresh, consecutive in-zone observations spanning at least this long are required before "centred". */
+  findCenteredDwellMs: 600,
+  /** Centre zone with hysteresis, as |nx-0.5| and |ny-0.5| of the box centre (normalised image coordinates). */
+  findCenterEnter: { x: 0.08, y: 0.1 },
+  findCenterExit: { x: 0.13, y: 0.16 },
+  /** Beacon pulse interval: far from centre -> near centre. Represents ALIGNMENT, never physical distance. */
+  findPulseFarMs: 700,
+  findPulseNearMs: 250,
+  /** Spoken vertical / spoken-mode prompts are not repeated more often than this. */
+  findPromptMinIntervalMs: 3_000,
+  maxFindCandidates: 4,
   maxFindQueryChars: 80,
   /** A frame older than this is not used to answer a fresh question; a new capture is required. */
   frameMaxAgeMs: 2_500,
@@ -271,6 +284,9 @@ export const ClientFind = z.object({
 });
 export const ClientFindStop = z.object({ type: z.literal('find.stop') });
 
+/** Choose one candidate in needs_selection (accessible control). Voice selection uses the select_target tool. */
+export const ClientFindSelect = z.object({ type: z.literal('find.select'), candidateId: z.number().int().nonnegative() });
+
 /** Explicit UI controls that do not rely on the model choosing a tool. */
 export const ClientAction = z.object({
   type: z.literal('action'),
@@ -311,6 +327,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ClientDetectFrame,
   ClientFind,
   ClientFindStop,
+  ClientFindSelect,
   ClientText,
   ClientAction,
   ClientSnapshotResult,
@@ -411,7 +428,7 @@ export const ServerSnapshotRequest = z.object({
 export const ServerTool = z.object({
   type: z.literal('tool'),
   callId: z.string().max(128),
-  name: z.enum(['read_label', 'look_again', 'find_object']),
+  name: z.enum(['read_label', 'look_again', 'find_object', 'select_target', 'stop_finding']),
   state: z.enum(['started', 'completed', 'cancelled', 'failed']),
 });
 
@@ -448,14 +465,42 @@ export type ServerDetections = z.infer<typeof ServerDetections>;
 
 export const FindState = z.enum([
   'searching', // looking, nothing matched yet
+  'needs_selection', // several matching objects: the user must choose one (voice or control)
   'tracking', // target visible in the image, not centred
   'centered', // target near the image centre
   'lost', // target was visible but is no longer
   'not_found', // gave up for this frame sequence / query not detectable
   'stopped', // user or app stopped find mode
   'timeout',
+  'unsupported', // the requested item is not in the supported list (see src/shared/find.ts)
+  'error', // detector unavailable/failed; conversation continues
 ]);
 export type FindState = z.infer<typeof FindState>;
+
+export const FindPromptKind = z.enum([
+  'not_seen', // "I don't see a bottle yet. Slowly scan the camera across the table."
+  'select', // "I see two cups. The left one or the right one?"
+  'reselect', // reacquisition ambiguous: ask again
+  'tracking', // first acquisition of the selected target (short)
+  'centred', // "Bottle centred in the camera."
+  'tilt_up', // "Tilt the phone up slightly."
+  'tilt_down', // "Tilt the phone down slightly."
+  'lost', // announced once per loss
+  'unsupported', // lists supported items
+  'stopped',
+  'error',
+]);
+export type FindPromptKind = z.infer<typeof FindPromptKind>;
+
+/** One candidate when several objects match (needs_selection). `position` is image-relative. */
+export const FindCandidate = z.object({
+  id: z.number().int().nonnegative(),
+  label: z.string().max(80),
+  score: z.number().min(0).max(1),
+  box: NormalizedBox,
+  position: z.enum(['left', 'middle', 'right']),
+});
+export type FindCandidate = z.infer<typeof FindCandidate>;
 
 /**
  * Find-mode progress. Positions are IMAGE-RELATIVE (where the item is in the camera picture), used to help the
@@ -474,6 +519,14 @@ export const ServerFind = z.object({
   description: z.string().max(160).nullable(),
   /** Server epoch ms. */
   at: z.number().int(),
+  /** Tracker id of the selected target (not a permanent identity), or null. */
+  trackId: z.number().int().nonnegative().nullable().optional(),
+  /** Client-clock capture time of the frame the target was observed in (for client staleness checks). */
+  observedAt: z.number().int().positive().nullable().optional(),
+  /** Present in needs_selection: the objects the user can choose between. */
+  candidates: z.array(FindCandidate).max(LIMITS.maxFindCandidates).optional(),
+  /** App-generated (never model-generated) phrase to speak once, e.g. tilt or centred confirmation. */
+  prompt: z.object({ kind: FindPromptKind, text: z.string().max(200) }).nullable().optional(),
 });
 export type ServerFind = z.infer<typeof ServerFind>;
 
