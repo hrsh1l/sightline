@@ -70,6 +70,15 @@ describe('AudioPlayer', () => {
     expect(player.getState().contextState).toBe('running');
   });
 
+  it('exposes its single output context (null before unlock, shared by cues)', async () => {
+    const { ctx, player } = setup();
+    expect(player.context).toBeNull();
+    await player.unlock();
+    expect(player.context).toBe(ctx);
+    await player.close();
+    expect(player.context).toBeNull();
+  });
+
   it('schedules chunks gap-free with a small lead and restarts the cursor when behind', async () => {
     const { ctx, sources, player } = setup();
     await player.unlock();

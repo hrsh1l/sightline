@@ -355,7 +355,6 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   /** A find is running (local or assistant-started). state.find may also hold an inactive final status. */
   let findOn = false;
   let findReqId: string | null = null;
-  let findLocal = false;
   /** Incremented on every find state transition (prompt de-duplication). */
   let findStateSeq = 0;
   const endedFindIds: string[] = [];
@@ -767,6 +766,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     const t = Math.max(currentTurn ?? 0, player.getState().turnId ?? 0, maxLocalTurn);
     if (t > 0) cancelledThrough = Math.max(cancelledThrough, t);
     player.flush(t > 0 ? t : undefined);
+    cancelGuidance(); // queued guidance must not start when the cancelled speech ends
     speech.cancel();
   }
 
@@ -1073,9 +1073,6 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       1_200 + text.length * 90,
     );
     speech.speak(text);
-    if (!speech.onSpeakingChange && !speech.speaking) {
-      // Fire-and-forget engine: keep the guard window via the safety timer only.
-    }
   }
 
   /** Resolves when the phrase has been spoken (or immediately when TTS is unavailable). */
@@ -1244,7 +1241,6 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     }
     findOn = false;
     findReqId = null;
-    findLocal = false;
     lastPromptHeard = null;
     stopFindCues();
     if (busyInfo?.kind === 'finding') clearBusy();
@@ -1280,6 +1276,56 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     });
     lastPromptHeard = null;
     enqueuePrompt({ kind: 'error', text }, true);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Stereo calibration (user-initiated)
+  // ---------------------------------------------------------------------------
+
+  const setCalibration = (patch: Partial<CalibrationState>) => setState({ calibration: { ...state.calibration, ...patch } });
+
+  /** Stop calibration tones and words now; the beacon may resume. */
+  function stopCalibration() {
+    calEpoch++;
+    const wasCalibrating = calibrating;
+    calibrating = false;
+    if (wasCalibrating) {
+      const ext = spatial as (SpatialCueEngine & { cancelCalibrationTone?: () => void }) | null;
+      if (ext?.cancelCalibrationTone) ext.cancelCalibrationTone();
+      else if (!findOn) spatial?.stopTracking();
+      if (guidanceSpeaking) {
+        guidanceSpeaking = false;
+        speech.cancel();
+      }
+      clearGuidanceSafety();
+      for (const w of [...ttsWaiters]) w();
+      ttsWaiters.clear();
+    }
+    updateSuppression();
+    pumpGuidance();
+  }
+
+  async function runCalibration(unlockP: Promise<void>) {
+    const my = ++calEpoch;
+    calibrating = true;
+    cancelGuidance(); // nothing else may talk during the test
+    if (player.getState().playing) controller.stopSpeaking();
+    const m = mic.getState().status;
+    // Bluetooth routing may differ (mono call audio) while the microphone is open: record it with the result.
+    setState({ calibration: { step: 'left', heardSeparation: null, micActive: m === 'active' || m === 'muted' } });
+    updateSuppression();
+    await unlockP.catch(() => undefined);
+    const steps = ['left', 'right', 'centre'] as const;
+    for (const ch of steps) {
+      if (my !== calEpoch) return;
+      setCalibration({ step: ch });
+      // speechSynthesis cannot be panned, so the word is heard centred; the TONE carries the channel.
+      await speakAndWait(CALIBRATION_PHRASES[ch]);
+      if (my !== calEpoch) return;
+      await (spatial?.calibrationTone(ch) ?? Promise.resolve());
+    }
+    if (my !== calEpoch) return;
+    setCalibration({ step: 'confirm' }); // the UI asks "Did you hear left, then right, then both?"
   }
 
   const FINAL_FALLBACK: Partial<Record<FindState, (q: string) => string>> = {
@@ -1328,7 +1374,6 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       }
       findOn = true;
       findReqId = msg.requestId;
-      findLocal = false;
       findStateSeq++;
       lastPromptHeard = null;
       setState({ find: null });
@@ -1441,7 +1486,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         void onSnapshotRequest(msg);
         return;
       case 'tool':
-        if (msg.name === 'find_object') return; // find messages drive busy/cues/announcements
+        // Find messages drive busy/cues/prompts for the find tools.
+        if (msg.name === 'find_object' || msg.name === 'select_target' || msg.name === 'stop_finding') return;
         if (msg.state === 'started') {
           const kind: BusyKind = msg.name === 'read_label' ? 'reading_label' : 'looking';
           setBusy(kind, null, true);
@@ -1461,7 +1507,14 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         markFirstText(key);
         pushEntry({ id: `answer-${++entryCounter}`, role: 'assistant', text: msg.text, final: true, source: 'snapshot_answer', at: now() });
         if (busyInfo?.requestId === msg.requestId) clearBusy();
-        if (state.settings.speakSnapshotAnswers && !paused && speech.supported) speech.speak(msg.text);
+        if (state.settings.speakSnapshotAnswers && !paused && speech.supported) {
+          // The answer replaces any guidance phrase in progress (speak() cancels the current utterance).
+          if (guidanceSpeaking) {
+            guidanceSpeaking = false;
+            clearGuidanceSafety();
+          }
+          speech.speak(msg.text);
+        }
         return;
       }
       case 'detections':
@@ -1494,6 +1547,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       camera.pause();
       flushAllPlayback();
       endFindLocal(); // the server ends find mode when hidden
+      if (calibrating) {
+        stopCalibration();
+        setState({ calibration: { ...state.calibration, step: 'idle', heardSeparation: null } });
+      }
       if (busyInfo && busyInfo.kind !== 'connecting') clearBusy();
       setConnection('paused');
       updateGate();
@@ -1570,6 +1627,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     stopWorkingCue();
     stopSampler();
     endFindLocal();
+    stopCalibration();
+    micReleased = false;
+    micRestoreOnResume = false;
     updateDetectSampler();
     camera.stop();
     mic.stop();
@@ -1637,6 +1697,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       delete lastDetections.yolo;
       delete lastDetections.gemini;
       sessionStartCuePlayed = false;
+      detectionArrivals.length = 0;
+      firstDetectionAt = null;
       framesSent = 0;
       framesDroppedLocal = 0;
       reconnects = 0;
@@ -1702,7 +1764,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         return;
       }
       cue('session_end');
-      spatial?.stopTracking();
+      // All cues stop first: beacon, guidance speech, calibration.
+      stopFindCues();
+      stopCalibration();
+      if (state.calibration.step !== 'idle' && state.calibration.step !== 'done') setState({ calibration: IDLE_CALIBRATION });
       teardown();
       setState({ connection: 'ended', busy: null, talking: false, detections: null, speaking: false });
       announce('Session ended.');
@@ -1713,6 +1778,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       // Local first: instant silence even if the socket is gone.
       if (t > 0) cancelledThrough = Math.max(cancelledThrough, t);
       player.flush(t > 0 ? t : undefined);
+      cancelGuidance();
       speech.cancel();
       if (t > 0 && t > turnOffset && ready) send({ type: 'playback.stop', turnId: t - turnOffset });
     },
@@ -1728,8 +1794,29 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     setTalking(down: boolean) {
       if (state.talking === down) return;
       setState({ talking: down });
-      if (down && state.settings.pushToTalk) cue('listening');
-      if (down && state.settings.pushToTalk && state.speaking) controller.stopSpeaking();
+      const ptt = state.settings.pushToTalk || micReleased;
+      if (down && ptt) cue('listening');
+      if (down && ptt && state.speaking) controller.stopSpeaking();
+      if (micReleased && active) {
+        // findMicPolicy 'release': the mic exists only while Talk is held. start() runs inside the tap gesture.
+        if (down) {
+          const ep = epoch;
+          void mic
+            .start()
+            .catch(() => undefined)
+            .then(() => {
+              if (!isActiveEpoch(ep)) return;
+              if (micReleased && !state.talking) mic.stop(); // released before the mic came up
+              else {
+                mic.setMuted(muted);
+                updateGate();
+              }
+            });
+        } else {
+          mic.stop();
+        }
+      }
+      updateSuppression();
       updateGate();
     },
 
@@ -1741,29 +1828,87 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       void spatial?.unlock();
       const q = query.trim().slice(0, LIMITS.maxFindQueryChars);
       if (!q || !isUsable()) return Promise.resolve();
-      if (findReqId !== null || state.find) endFindLocal(); // the server replaces it silently
+      // Old find's cues stop first (target change). The server replaces its find silently.
+      if (findOn || state.find) endFindLocal(undefined, true);
+      if (camera.getState().facing === 'user') {
+        // Positions are about the unmirrored REAR camera picture; the selfie camera would invert left/right.
+        applyFindMicPolicy();
+        showLocalFindError(q, REAR_CAMERA_PROMPT);
+        return Promise.resolve();
+      }
       const requestId = `find-${++reqCounter}`;
       if (!send({ type: 'find', requestId, query: q })) {
+        applyFindMicPolicy();
         setError({ code: 'network', message: 'Not connected. Try again in a moment.', recoverable: true, action: 'none' });
         return Promise.resolve();
       }
+      findOn = true;
       findReqId = requestId;
-      findLocal = true;
-      findCenteredOnce = false;
+      findStateSeq++;
+      lastPromptHeard = null;
       // Best guess until the server's first find message names the source.
       const source = state.server?.detector && cocoMatch(q)?.exact ? 'yolo' : 'gemini';
-      setState({ find: { query: q, state: 'searching', source, target: null, description: null, updatedAt: now() } });
+      setState({
+        find: {
+          query: q,
+          state: 'searching',
+          source,
+          target: null,
+          description: null,
+          updatedAt: now(),
+          trackId: null,
+          observedAt: null,
+          candidates: [],
+          lastPrompt: null,
+        },
+      });
       setBusy('finding', requestId);
       spatial?.startTracking();
-      announce(`Finding ${q}. Move the camera slowly; beeps will guide you.`);
+      announce(`Finding ${q}.`);
+      applyFindMicPolicy();
+      updateSuppression();
       updateDetectSampler();
       return Promise.resolve();
     },
 
     stopFind() {
-      if (findReqId === null && !state.find) return;
+      // Immediate local silence FIRST (beacon + guidance speech), then tell the server.
+      stopFindCues();
+      if (!findOn && findReqId === null) {
+        if (state.find) setState({ find: null }); // inactive final / error status
+        return;
+      }
       send({ type: 'find.stop' });
       endFindLocal('Stopped finding.');
+    },
+
+    selectTarget(candidateId: number) {
+      void spatial?.unlock(); // from a tap
+      if (!findOn || !Number.isInteger(candidateId) || candidateId < 0) return;
+      send({ type: 'find.select', candidateId });
+    },
+
+    startCalibration() {
+      // Unlock audio synchronously inside the tap, before anything else.
+      const unlockP = player.unlock();
+      void spatial?.unlock();
+      return runCalibration(unlockP);
+    },
+
+    answerCalibration(heardSeparation: boolean) {
+      if (state.calibration.step === 'idle') return;
+      stopCalibration();
+      setCalibration({ step: 'done', heardSeparation });
+      if (!heardSeparation) {
+        // No left/right separation reached the ears (mono route or mono accessibility setting): use words instead.
+        controller.updateSettings({ guidanceMode: 'spoken' });
+        announce(CALIBRATION_FALLBACK_TEXT);
+      }
+    },
+
+    cancelCalibration() {
+      stopCalibration();
+      setState({ calibration: { ...state.calibration, step: 'idle', heardSeparation: null } });
     },
 
     async setTorch(on: boolean) {
@@ -1852,6 +1997,11 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         if (state.connection === 'live') startSampler();
         updateDetectSampler();
       }
+      if (micRestoreOnResume && !micReleased && !paused) {
+        // Find ended while hidden in mic-release mode: reopen the normal mic now (from this tap).
+        micRestoreOnResume = false;
+        restartMic();
+      }
       await unlockP.catch(() => undefined);
       if (!isActiveEpoch(ep)) return;
       if (player.getState().contextState === 'running' && state.error?.action === 'tap_to_resume') setError(null);
@@ -1879,16 +2029,28 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
 
     updateSettings(patch: Partial<AssistantSettings>) {
       const prev = state.settings;
-      const next = { ...prev, ...patch };
+      const next = sanitizeSettings({ ...prev, ...patch });
       setState({ settings: next });
       if ('detections' in patch && patch.detections !== undefined) detectionsChosen = patch.detections;
       if ((prev.pushToTalk !== next.pushToTalk || prev.detections !== next.detections) && ready) {
         send({ type: 'settings', settings: clientSettings() });
       }
-      if (!next.detections && !state.find) setState({ detections: null });
-      if (prev.earcons !== next.earcons || prev.spatialAudio !== next.spatialAudio || prev.haptics !== next.haptics || prev.headphones !== next.headphones) {
+      if (!next.detections && !findOn) setState({ detections: null });
+      if (
+        prev.earcons !== next.earcons ||
+        prev.spatialAudio !== next.spatialAudio ||
+        prev.haptics !== next.haptics ||
+        prev.cueVolume !== next.cueVolume ||
+        prev.guidanceMode !== next.guidanceMode
+      ) {
         applySpatialConfig();
       }
+      if (prev.guidanceMode !== next.guidanceMode) {
+        // Switching mode mid-find: drop pending words/prompts of the old mode.
+        cancelGuidance();
+        lastDirectionAt = Number.NEGATIVE_INFINITY;
+      }
+      if (prev.findMicPolicy !== next.findMicPolicy) applyFindMicPolicy();
       updateGate();
       updateDetectSampler();
     },

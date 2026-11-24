@@ -305,7 +305,7 @@ export function createSpatialCues(opts: SpatialCuesOptions = {}): SpatialCueEngi
   function ensureCtx(): AudioContext | null {
     if (closed) return null;
     if (getShared) {
-      let c: AudioContext | null = null;
+      let c: AudioContext | null;
       try {
         c = getShared();
       } catch {
