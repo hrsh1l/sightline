@@ -1076,7 +1076,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   }
 
   async function captureLabelStill(): Promise<CapturedFrame | null> {
-    await waitForCameraStarting();
+    if (camera.getState().status === 'requesting') await waitForCameraStarting();
     cue('listening');
     let frame: CapturedFrame | null = null;
     if (typeof camera.captureStill === 'function') {
