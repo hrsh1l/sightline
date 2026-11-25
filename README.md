@@ -7,6 +7,7 @@ it: "What am I holding?", "Read the label", "Just the microwave part", "Guide me
 **Hiya Voice AI Challenge · Track: Accessibility** (with Real-Time Assistance)
 
 - 📄 **One-page write-up:** [WRITEUP.md](WRITEUP.md)
+- 🖼️ **Walkthrough with screenshots (real Gemini output):** [docs/how-it-works.md](docs/how-it-works.md)
 - 🤖 **AI tools used and how:** [ai.md](ai.md)
 - 🧱 **Architecture and tradeoffs:** [docs/architecture.md](docs/architecture.md)
 - ✅ **What was tested, and how:** [docs/test-results.md](docs/test-results.md)
