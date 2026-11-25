@@ -1,18 +1,58 @@
-# Sightline
+# Sightline: ask about what's in front of you
 
-**Ask about what's in front of you.** Sightline is a conversational visual assistant prototype for blind and
-low-vision people. Point a phone's rear camera at something, ask out loud ("What am I holding?", "Read the
-label", "Just the microwave instructions", "Repeat that", "Look again") and hear a short spoken answer.
-The first demonstration is in a kitchen — ingredients, packaging, cooking instructions and dates — but nothing
-in the product is cooking-specific: it works for everyday objects and printed text.
+A voice-first visual assistant for blind and low-vision people. Point a phone camera at something and *talk* about
+it: "What am I holding?", "Read the label", "Just the microwave part", "Guide me through these instructions",
+"Find the mug". Short spoken answers that you can interrupt.
 
-This is a **phone prototype** (Samsung Galaxy S25, Chrome) with a Node backend on a development computer.
-Smart glasses are future work only (see [submission.md](submission.md)); there is no glasses integration.
+**Hiya Voice AI Challenge · Track: Accessibility** (with Real-Time Assistance)
 
-> **Verification status (2026-11-23).** Automated, integration and desktop-browser tests pass with clearly
-> labelled fixture providers — see [docs/test-results.md](docs/test-results.md). **Not yet verified:** real
-> Gemini Live / Gemini vision calls (no API key was configured in the build environment) and a physical S25.
-> Run `npm run check:models` and the [manual checklist](docs/mobile-checklist.md) before relying on it.
+- 📄 **One-page write-up:** [WRITEUP.md](WRITEUP.md)
+- 🤖 **AI tools used and how:** [ai.md](ai.md)
+- 🧱 **Architecture and tradeoffs:** [docs/architecture.md](docs/architecture.md)
+- ✅ **What was tested, and how:** [docs/test-results.md](docs/test-results.md)
+
+## Quick start (about 5 minutes, laptop only)
+
+You need **Node.js 22.12 or later** and a **Gemini API key** from [Google AI Studio](https://aistudio.google.com/apikey).
+The free tier works but has low daily limits.
+
+```sh
+git clone https://github.com/hrsh1l/sightline.git && cd sightline
+npm ci                     # "allow-scripts" warnings are harmless
+cp .env.example .env       # then set GEMINI_API_KEY=... in .env (stays on the server; never sent to the browser)
+npm run dev                # http://localhost:3000
+```
+
+Open **http://localhost:3000** in desktop Chrome and tap **Start assistant**. Allow camera and microphone (a
+laptop webcam is fine), then try these:
+
+| Say (or tap) | What happens |
+|---|---|
+| "What am I holding?" | It describes the object in one or two sentences |
+| "Read the label" / **Read label** | It takes a fresh photo, reads the exact printed text and checks the dates |
+| "Guide me through these instructions" | It checks the framing, then walks through the printed steps: say "next", "repeat", "what does that mean?", "done", "where were we?" |
+| "Stop" / **Stop speaking** | It goes silent at once; you can interrupt any time |
+| **Pause camera** | The camera turns off and you can keep talking |
+
+Without a key the page still loads and says it isn't configured. With a key, `npm run check:models` confirms your
+account can use the models.
+Find mode's directional audio needs a rear phone camera and the optional local detector (see below).
+
+### On a phone (as built and demoed: Samsung Galaxy S25, Chrome)
+
+Camera and microphone need a secure page, so the phone opens `http://localhost:3000` forwarded over adb.
+Details are in [Open it on the Samsung Galaxy S25](#open-it-on-the-samsung-galaxy-s25).
+
+```sh
+adb devices && adb reverse tcp:3000 tcp:3000   # USB, or Wireless debugging (below)
+```
+
+### Run the tests (no API key or quota needed)
+
+```sh
+npm run verify             # typecheck, lint, build, 1,028 unit + integration tests, client secret scan
+npx playwright install chromium && npm run test:e2e   # 11 browser end-to-end tests (fake camera/mic, FIXTURE Gemini)
+```
 
 ## How it works
 
@@ -59,14 +99,13 @@ Details and tradeoffs: [docs/architecture.md](docs/architecture.md).
 
 - Node.js ≥ 22.12 (built and tested with Node 26.5.1, npm 11.17.0) on macOS/Linux/Windows.
 - A Gemini API key from Google AI Studio with access to a Live model and a Flash vision model.
-- Samsung Galaxy S25 (or another Android phone) with Chrome, a data-capable USB cable, and Android platform
+- For the phone route: Samsung Galaxy S25 (or another Android phone) with Chrome, a data-capable USB cable, and Android platform
   tools (`adb`) on the computer — macOS: `brew install --cask android-platform-tools`.
 - Optional: [`uv`](https://docs.astral.sh/uv/) for the YOLO detector.
 
-## Setup
+## Setup (detailed)
 
 ```sh
-git checkout feat/sightline
 npm ci                     # npm may print "allow-scripts" warnings for esbuild/protobufjs; they are harmless
 cp .env.example .env       # then edit .env locally and set GEMINI_API_KEY=...  (never commit it or paste it in chat)
 npm run check:models       # verifies YOUR account can use LIVE_MODEL and VISION_MODEL (sends only "Say OK")
@@ -209,7 +248,11 @@ More: [docs/s25-connection.md](docs/s25-connection.md).
 
 ## Known limitations
 
-- Not yet run against the real Gemini APIs or on a physical S25 (see status above); latency has not been measured.
+- Tested against real Gemini (see test results) and informally on a Galaxy S25. The formal phone checklist,
+  Find with Bluetooth earbuds, and the instruction companion on the phone have not been fully run. Phone latency
+  has not been measured.
+- On the Gemini free tier, requests sometimes fail with overload or quota errors. Sightline reports this rather
+  than guessing.
 - Gemini Live is a preview API; model names, limits and behaviour may change.
 - Echo cancellation quality on the phone speaker is unverified; use headphones or push-to-talk if the assistant
   hears itself.
@@ -220,5 +263,5 @@ More: [docs/s25-connection.md](docs/s25-connection.md).
 ## Repository map
 
 `src/shared/protocol.ts` (message contract) · `src/client/{camera,audio,session,ui}` · `src/server/{session,live,vision,http}` ·
-`services/detector` (optional YOLO) · `tests/` · `docs/` · [ai.md](ai.md) · [submission.md](submission.md) ·
+`services/detector` (optional YOLO) · `tests/` · `docs/` · [ai.md](ai.md) · [WRITEUP.md](WRITEUP.md) ·
 [demo-script.md](demo-script.md) · [ATTRIBUTION.md](ATTRIBUTION.md)
