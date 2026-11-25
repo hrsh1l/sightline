@@ -98,3 +98,4 @@ Status values: `todo`, `in progress`, `done (verified: …)`, `deferred`, `block
 | 27 | Integration: fast guide model, fixed cut-off adjustments, edge evidence, same-model retry, prompt fix, camera-start wait | lead | done (1023 tests, 10/10 e2e, live runs above) |
 | 28 | Optional timers | — | deferred (core flow prioritised) |
 | 29 | S25 demo of the instruction companion | user | outstanding |
+| 30 | Pause camera button (camera released, no frames, model told it cannot see; voice continues) | lead | done (unit, integration, Chromium e2e); not yet tried on the S25 |

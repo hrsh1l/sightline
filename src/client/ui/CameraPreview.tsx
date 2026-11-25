@@ -66,7 +66,9 @@ export function CameraPreview({
         {show && items.length > 0 && (
           <DetectionOverlay items={items} source={overlaySource(detections, find)} sourceSize={source} element={elementSize} />
         )}
-        {show && camera.status !== 'active' && <p className="preview__placeholder">Camera off</p>}
+        {show && camera.status !== 'active' && (
+          <p className="preview__placeholder">{camera.status === 'paused' ? 'Camera paused' : 'Camera off'}</p>
+        )}
       </div>
       <DetectionSummary detections={detections} find={find} />
     </>

@@ -14,6 +14,8 @@ export function Controls({ state, controller }: { state: AssistantState; control
   const canSwitch = state.camera.canSwitch && state.camera.status === 'active';
   const torchUsable = state.camera.torch.supported && state.camera.status === 'active';
   const torchOn = torchUsable && state.camera.torch.on;
+  const cameraPaused = state.cameraPaused;
+  const cameraHint = cameraPaused ? 'camera-hint' : undefined;
 
   return (
     <section className="controls" aria-labelledby="controls-heading">
@@ -75,7 +77,7 @@ export function Controls({ state, controller }: { state: AssistantState; control
           type="button"
           className="btn btn--primary"
           disabled={!ready}
-          aria-describedby={ready ? undefined : 'controls-unavailable'}
+          aria-describedby={ready ? cameraHint : 'controls-unavailable'}
           onClick={() => void controller.readLabel()}
         >
           <span className="btn__label">Read label</span>
@@ -103,7 +105,7 @@ export function Controls({ state, controller }: { state: AssistantState; control
           type="button"
           className="btn"
           disabled={!ready}
-          aria-describedby={ready ? undefined : 'controls-unavailable'}
+          aria-describedby={ready ? cameraHint : 'controls-unavailable'}
           onClick={() => void controller.lookAgain()}
         >
           <span className="btn__label">Look again</span>
@@ -119,6 +121,19 @@ export function Controls({ state, controller }: { state: AssistantState; control
         </button>
         <button
           type="button"
+          className={`btn btn--toggle${cameraPaused ? ' is-active' : ''}`}
+          disabled={!ready && !cameraPaused}
+          aria-describedby="camera-hint"
+          data-testid="camera-pause"
+          onClick={() => void controller.setCameraPaused(!cameraPaused)}
+        >
+          <span className="btn__label">{cameraPaused ? 'Resume camera' : 'Pause camera'}</span>
+          <span className="btn__state" id="camera-hint" aria-hidden="true">
+            {cameraPaused ? 'Camera off — Sightline can still hear you' : 'Turn the camera off; keep talking'}
+          </span>
+        </button>
+        <button
+          type="button"
           className="btn"
           disabled={!canSwitch}
           aria-describedby={canSwitch ? undefined : 'switch-hint'}
@@ -127,7 +142,7 @@ export function Controls({ state, controller }: { state: AssistantState; control
           <span className="btn__label">Switch camera</span>
           {!canSwitch && (
             <span className="btn__state" id="switch-hint" aria-hidden="true">
-              {state.camera.status === 'active' ? 'Only one camera found' : 'Camera is not on'}
+              {cameraPaused ? 'Camera paused' : state.camera.status === 'active' ? 'Only one camera found' : 'Camera is not on'}
             </span>
           )}
         </button>

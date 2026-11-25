@@ -285,3 +285,14 @@ Real-detector Find e2e still **2/2**.
 
 ### Physical S25 / Buds3 Pro
 **Not yet run** for the instruction companion. Demo steps: see demo-script.md.
+
+## Pause camera, 2026-11-25
+
+- Automated (FIXTURE providers): `npm run verify` 42 files / 1028 tests pass, including controller tests (camera
+  released, no ambient or detection frames, Read label / Look again / Guide / Find refused locally, typed questions
+  sent without a photo, voice snapshot requests answered `camera_off`, backgrounding does not re-open the camera,
+  state re-sent after reconnect) and a server test (model told, frames dropped, Find refused, frames resume).
+- Desktop Chromium (fake camera): `tests/e2e/camera-pause.spec.ts` passes. The video track is ended while paused, no
+  frames reach the provider for 2.5 s, the model receives the "camera paused" app event, and frames resume after
+  Resume camera. Full Playwright suite 11/11.
+- Live Gemini / S25: not yet run.

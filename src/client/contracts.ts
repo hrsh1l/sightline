@@ -89,8 +89,8 @@ export interface CameraController extends Store<CameraState> {
   stop(): void;
   /** Switch between rear/front (or next device). Only after permission. */
   switchCamera(): Promise<void>;
-  /** Pause (page hidden) / resume. Resume may require restarting the track. */
-  pause(): void;
+  /** Pause (page hidden, or the user's Pause camera) / resume. Releases the device. Resume may restart the track. */
+  pause(message?: string): void;
   resume(): Promise<void>;
   /** Capture a frame now. Returns null if the video has no valid dimensions or the camera is not active. */
   capture(opts: CaptureOptions): Promise<CapturedFrame | null>;
@@ -359,6 +359,8 @@ export interface AssistantState {
   connection: ConnectionStatus;
   mode: SessionMode;
   camera: CameraState;
+  /** The user turned the camera off with Pause camera (conversation continues without vision). */
+  cameraPaused: boolean;
   mic: MicState;
   player: PlayerState;
   /** Assistant speaking (live audio or TTS). */
@@ -416,6 +418,8 @@ export interface AssistantController extends Store<AssistantState> {
   repeat(): void;
   sendText(text: string): Promise<void>;
   switchCamera(): Promise<void>;
+  /** Pause camera / Resume camera. Pausing releases the camera and stops all frames; call resume from a tap. */
+  setCameraPaused(paused: boolean): Promise<void>;
   /** Resume after background / suspended audio. Call from a tap. */
   resume(): Promise<void>;
   setMode(mode: SessionMode): void;

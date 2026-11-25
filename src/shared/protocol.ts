@@ -344,6 +344,9 @@ export const ClientPlaybackStop = z.object({ type: z.literal('playback.stop'), t
 /** Page hidden / visible. While paused, the server must not forward media and the client must not send it. */
 export const ClientVisibility = z.object({ type: z.literal('visibility'), state: z.enum(['hidden', 'visible']) });
 
+/** User paused / resumed the camera (privacy). Conversation continues; the server tells the model it cannot see. */
+export const ClientCamera = z.object({ type: z.literal('camera'), state: z.enum(['paused', 'on']) });
+
 export const ClientSettingsUpdate = z.object({ type: z.literal('settings'), settings: ClientSettings });
 
 export const ClientBye = z.object({ type: z.literal('bye') });
@@ -365,6 +368,7 @@ export const ClientMessage = z.discriminatedUnion('type', [
   ClientSnapshotUnavailable,
   ClientPlaybackStop,
   ClientVisibility,
+  ClientCamera,
   ClientSettingsUpdate,
   ClientBye,
 ]);

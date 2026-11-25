@@ -772,10 +772,10 @@ export function createCameraController(opts: CameraControllerOptions = {}): Came
       await open(constraintChain({ deviceId: prevDeviceId, facing: prevFacing }), gen);
     },
 
-    pause() {
+    pause(message?: string) {
       if (state.status !== 'active' && state.status !== 'requesting') return;
       releaseStream(); // also invalidates a pending start
-      setState({ status: 'paused', message: CAMERA_MESSAGES.paused, videoWidth: 0, videoHeight: 0 });
+      setState({ status: 'paused', message: message ?? CAMERA_MESSAGES.paused, videoWidth: 0, videoHeight: 0 });
     },
 
     async resume() {

@@ -163,6 +163,23 @@ describe('WebSocket session (real server, FIXTURE Live + FIXTURE vision)', () =>
     expect(Math.min(...gaps)).toBeGreaterThanOrEqual(900);
   });
 
+  it('camera paused: tells the model it cannot see, drops frames, refuses Find; camera on resumes frames', async () => {
+    const { client, session } = await start();
+    client.send({ type: 'camera', state: 'paused' });
+    await until(() => session.clientContent.some((c) => JSON.stringify(c.params).includes('paused the camera')));
+    client.send({ type: 'frame', frame: fixtureFrame() });
+    client.send({ type: 'find', requestId: 'find-1', query: 'cup' });
+    const err = await client.waitFor('error', (m) => m.requestId === 'find-1');
+    expect(err.message).toMatch(/camera is paused/i);
+    await sleep(150);
+    expect(session.frames).toHaveLength(0);
+
+    client.send({ type: 'camera', state: 'on' });
+    await until(() => session.clientContent.some((c) => JSON.stringify(c.params).includes('camera back on')));
+    client.send({ type: 'frame', frame: fixtureFrame() });
+    await until(() => session.frames.length === 1);
+  });
+
   it('drops stale (old capturedAt) and out-of-order (lower frameId) frames', async () => {
     const { client, session } = await start();
     const newer = fixtureFrame();

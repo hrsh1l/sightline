@@ -25,6 +25,7 @@ import { encodePcm16Base64 } from '../audio/pcm.js';
 import {
   CALIBRATION_FALLBACK_TEXT,
   CAMERA_STOPPED_FIND_TEXT,
+  CAMERA_PAUSED_TEXT,
   CENTRED_SPEECH_DELAY_MS,
   GUIDANCE_TTS_TAIL_MS,
   GUIDANCE_WAIT_FOR_ASSISTANT_MS,
@@ -704,6 +705,79 @@ describe('visibility', () => {
     expect(h.socket.sent.at(-1)).toEqual({ type: 'visibility', state: 'visible' });
     expect(h.controller.getState().connection).toBe('live');
     expect(h.sampler.start).toHaveBeenCalled();
+  });
+});
+
+describe('pause camera', () => {
+  it('releases the camera, stops frames, refuses camera actions, keeps talking; resume turns it back on', async () => {
+    const h = await started();
+    h.sampler.start.mockClear();
+    await h.controller.setCameraPaused(true);
+    const st = h.controller.getState();
+    expect(st.cameraPaused).toBe(true);
+    expect(st.connection).toBe('live');
+    expect(h.camera.pause).toHaveBeenCalled();
+    expect(h.sampler.stop).toHaveBeenCalled();
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'camera', state: 'paused' });
+
+    // No frames leave the phone; the microphone still streams.
+    h.sampler.emit(frame());
+    expect(h.socket.types()).not.toContain('frame');
+    h.mic.emit(loud);
+    expect(h.socket.types()).toContain('audio');
+
+    // Camera actions are refused locally, without a capture.
+    h.camera.capture.mockClear();
+    await h.controller.readLabel();
+    await h.controller.lookAgain();
+    await h.controller.guideInspect('instructions');
+    await h.controller.find('cup');
+    expect(h.camera.capture).not.toHaveBeenCalled();
+    expect(h.socket.types().filter((t) => t === 'action' || t === 'guide.inspect' || t === 'find')).toEqual([]);
+    expect(h.controller.getState().announcement?.text).toBe(CAMERA_PAUSED_TEXT);
+
+    // Typed questions still go to Gemini, without a photo.
+    await h.controller.sendText('What time is it?');
+    expect(h.socket.sent.at(-1)).toMatchObject({ type: 'text', text: 'What time is it?' });
+    expect(h.socket.sent.at(-1)).not.toHaveProperty('frame');
+
+    // Server snapshot requests (voice tools) are answered with camera_off.
+    h.socket.receive({ type: 'snapshot.request', requestId: 'snap-9', purpose: 'read_label', maxDim: 1600 });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(h.socket.sent.at(-1)).toEqual({ type: 'snapshot.unavailable', requestId: 'snap-9', reason: 'camera_off' });
+
+    // Backgrounding and resuming the app does not turn the camera back on by itself.
+    setVisibility('hidden');
+    setVisibility('visible');
+    h.camera.resume.mockClear();
+    await h.controller.resume();
+    expect(h.camera.resume).not.toHaveBeenCalled();
+    expect(h.controller.getState().cameraPaused).toBe(true);
+
+    await h.controller.setCameraPaused(false);
+    expect(h.camera.resume).toHaveBeenCalled();
+    expect(h.controller.getState().cameraPaused).toBe(false);
+    expect(h.socket.sent.some((m) => m.type === 'camera' && m.state === 'on')).toBe(true);
+    expect(h.sampler.start).toHaveBeenCalled();
+    expect(h.controller.getState().announcement?.text).toBe('Camera on.');
+  });
+
+  it('re-tells the server after a reconnect and resets when the session ends', async () => {
+    const h = await started();
+    await h.controller.setCameraPaused(true);
+    const first = h.socket;
+    first.serverClose();
+    await vi.advanceTimersByTimeAsync(150);
+    expect(h.socket).not.toBe(first);
+    h.socket.open();
+    h.socket.receive(readyMsg('live'));
+    expect(h.socket.sent).toContainEqual({ type: 'camera', state: 'paused' });
+    h.controller.end();
+    const h2 = h.controller.start();
+    h.socket.open();
+    h.socket.receive(readyMsg('live'));
+    await h2;
+    expect(h.controller.getState().cameraPaused).toBe(false);
   });
 });
 

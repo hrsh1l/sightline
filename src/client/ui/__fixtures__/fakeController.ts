@@ -25,6 +25,7 @@ export function makeState(overrides: Partial<AssistantState> = {}): AssistantSta
       stillCapture: false,
       message: null,
     },
+    cameraPaused: false,
     mic: { status: 'idle', level: 0, echoCancellation: null, message: null },
     player: { playing: false, turnId: null, contextState: 'uninitialized' },
     speaking: false,
@@ -257,6 +258,7 @@ export class FakeController implements AssistantController {
   repeat = vi.fn((): void => {});
   sendText = vi.fn(async (_text: string): Promise<void> => {});
   switchCamera = vi.fn(async (): Promise<void> => {});
+  setCameraPaused = vi.fn(async (_paused: boolean): Promise<void> => {});
   resume = vi.fn(async (): Promise<void> => {});
   setMode = vi.fn((_mode: AssistantState['mode']): void => {});
   updateSettings = vi.fn((_patch: Partial<AssistantState['settings']>): void => {});

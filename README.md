@@ -127,8 +127,9 @@ On the phone open `https://<host>/?access=<token>` once (sets an HttpOnly cookie
    Gemini. Nothing is saved by Sightline after the session ends.
 2. **Start assistant** (this tap also unlocks audio playback).
 3. Hold an item up to the rear camera and ask. Buttons give dependable alternatives to voice:
-   **Read label**, **Look again**, **Repeat**, **Stop speaking**, **Mute microphone**, **Switch camera**, a typed
-   question field, and **End session** (stops camera, microphone, transmission and playback immediately).
+   **Read label**, **Look again**, **Repeat**, **Stop speaking**, **Mute microphone**, **Switch camera**,
+   **Pause camera** (turns the camera off and releases it; the conversation continues by voice, Gemini is told it
+   cannot see, and Read label / Find / Guide ask you to resume first), a typed question field, and **End session** (stops camera, microphone, transmission and playback immediately).
 4. Settings: Live/Snapshot mode, push-to-talk (for noisy rooms or speaker echo), "pause microphone while Sightline
    speaks", camera preview, detector overlay, diagnostics (models, frame age, latency).
 

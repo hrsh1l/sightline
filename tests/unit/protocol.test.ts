@@ -55,6 +55,7 @@ const validClient: Record<ClientMessage['type'], ClientMessage> = {
   'snapshot.unavailable': { type: 'snapshot.unavailable', requestId: 'snap-1', reason: 'camera_denied' },
   'playback.stop': { type: 'playback.stop', turnId: 4 },
   visibility: { type: 'visibility', state: 'hidden' },
+  camera: { type: 'camera', state: 'paused' },
   settings: { type: 'settings', settings: { pushToTalk: true, detections: false } },
   bye: { type: 'bye' },
 };

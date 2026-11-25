@@ -175,6 +175,8 @@ function sanitizeSettings(s: AssistantSettings): AssistantSettings {
 
 export const REAR_CAMERA_PROMPT = 'Find works with the rear camera. Switch to the rear camera first.';
 export const CAMERA_STOPPED_FIND_TEXT = 'The camera stopped, so Find has stopped.';
+export const CAMERA_PAUSED_TEXT = 'The camera is paused. Tap Resume camera first.';
+export const CAMERA_PAUSED_MESSAGE = 'Camera paused. Tap Resume camera to turn it back on.';
 /** Guidance prompts wait at most this long for assistant (Gemini) audio to finish, then speak. */
 export const GUIDANCE_WAIT_FOR_ASSISTANT_MS = 4_000;
 /** Unspoken guidance older than this is dropped. */
@@ -321,6 +323,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     connection: 'idle',
     mode: 'live',
     camera: camera.getState(),
+    cameraPaused: false,
     mic: mic.getState(),
     player: player.getState(),
     speaking: false,
@@ -370,6 +373,8 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Paused by visibility; stays true until resume() from a tap. */
   let paused = false;
+  /** The user paused the camera (Pause camera): no capture, no frames, until they resume it. */
+  let cameraOff = false;
   let muted = false;
   let audioSeq = 0;
   let audioStreaming = false;
@@ -775,7 +780,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   }
 
   function startSampler() {
-    if (samplerRunning || !active || paused) return;
+    if (samplerRunning || !active || paused || cameraOff) return;
     sampler ??= deps.createSampler(camera);
     samplerRunning = true;
     sampler.start(onSampledFrame);
@@ -792,7 +797,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
   // ---------------------------------------------------------------------------
 
   function wantDetectFrames(): boolean {
-    if (!deps.createDetectSampler || !active || !ready || paused) return false;
+    if (!deps.createDetectSampler || !active || !ready || paused || cameraOff) return false;
     if (state.connection !== 'live' && state.connection !== 'snapshot') return false;
     if (doc && doc.visibilityState === 'hidden') return false;
     return (state.settings.detections && state.server?.detector === true) || findOn;
@@ -964,6 +969,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     }
     setConnection(target);
     sayGuideLost();
+    if (cameraOff) send({ type: 'camera', state: 'paused' });
     if (target === 'live') startSampler();
     updateDetectSampler();
   }
@@ -1765,6 +1771,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
 
   async function explicitCapture(action: 'read_label' | 'look_again') {
     if (!isUsable()) return;
+    if (cameraOff) return announce(CAMERA_PAUSED_TEXT, 'assertive');
     const ep = epoch;
     const pressAt = now();
     const kind: BusyKind = action === 'read_label' ? 'reading_label' : 'looking';
@@ -1828,6 +1835,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     }
     detachVisibility();
     paused = false;
+    cameraOff = false;
   }
 
   const MEDIA_RETRYABLE = new Set(['idle', 'denied', 'unavailable', 'in_use', 'disconnected', 'error', 'stopped']);
@@ -1891,6 +1899,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       reconnects = 0;
       setState({
         connection: 'connecting',
+        cameraPaused: false,
         error: null,
         detections: null,
         find: null,
@@ -2018,6 +2027,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
         announce(GUIDE_NOT_CONNECTED_TEXT, 'assertive');
         return;
       }
+      if (cameraOff) {
+        announce(CAMERA_PAUSED_TEXT, 'assertive');
+        return;
+      }
       if (guideInspectReq !== null && busyInfo?.kind === 'checking_view') {
         announce('Still checking the view.');
         return;
@@ -2090,6 +2103,10 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       void spatial?.unlock();
       const q = query.trim().slice(0, LIMITS.maxFindQueryChars);
       if (!q || !isUsable()) return Promise.resolve();
+      if (cameraOff) {
+        announce(CAMERA_PAUSED_TEXT, 'assertive');
+        return Promise.resolve();
+      }
       // Old find's cues stop first (target change). The server replaces its find silently.
       if (findOn || state.find) endFindLocal(undefined, true);
       if (camera.getState().facing === 'user') {
@@ -2199,9 +2216,9 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       const live = state.connection === 'live';
       pushEntry({ id: `typed-${++entryCounter}`, role: 'user', text: t, final: true, source: 'typed', at: pressAt });
       setBusy('answering', null);
-      let frame: CapturedFrame | null;
+      let frame: CapturedFrame | null = null;
       try {
-        frame = await camera.capture(
+        if (!cameraOff) frame = await camera.capture(
           live
             ? { maxDim: LIMITS.liveFrameMaxDim, jpegQuality: LIMITS.liveFrameJpegQuality }
             : { maxDim: LIMITS.snapshotMaxDim, jpegQuality: LIMITS.snapshotJpegQuality },
@@ -2212,7 +2229,12 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       if (!isActiveEpoch(ep)) return;
       if (!live && !frame) {
         clearBusy();
-        setError({ code: 'camera', message: 'A photo is needed in snapshot mode, but the camera is unavailable.', recoverable: true, action: 'retry' });
+        setError({
+          code: 'camera',
+          message: cameraOff ? 'A photo is needed in snapshot mode. Tap Resume camera first.' : 'A photo is needed in snapshot mode, but the camera is unavailable.',
+          recoverable: true,
+          action: cameraOff ? 'none' : 'retry',
+        });
         return;
       }
       const requestId = `text-${++reqCounter}`;
@@ -2228,12 +2250,50 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
     },
 
     async switchCamera() {
+      if (cameraOff) return;
       const ep = epoch;
       try {
         await camera.switchCamera();
       } catch {
         if (ep === epoch) setError({ code: 'camera', message: 'Could not switch camera.', recoverable: true, action: 'none' });
       }
+    },
+
+    async setCameraPaused(pause: boolean) {
+      if (!active || pause === cameraOff) return;
+      const ep = epoch;
+      if (pause) {
+        cameraOff = true;
+        // Find needs the picture: stop its cues and the server's find first.
+        if (findOn || state.find) controller.stopFind();
+        if (guideInspectReq !== null && busyInfo?.kind === 'checking_view') clearBusy();
+        stopSampler();
+        updateDetectSampler();
+        if (camera.getState().status === 'active' || camera.getState().status === 'requesting') camera.pause(CAMERA_PAUSED_MESSAGE);
+        send({ type: 'camera', state: 'paused' });
+        setState({ cameraPaused: true, detections: null, camera: camera.getState() });
+        announce('Camera paused. I can still hear you.');
+        return;
+      }
+      cameraOff = false;
+      setState({ cameraPaused: false });
+      announce('Turning the camera on.');
+      try {
+        if (camera.getState().status === 'paused') await camera.resume();
+        else if (camera.getState().status !== 'active') await camera.start();
+      } catch {
+        /* reported below from the camera state */
+      }
+      if (!isActiveEpoch(ep) || cameraOff) return;
+      send({ type: 'camera', state: 'on' });
+      const cs = camera.getState();
+      if (cs.status !== 'active') {
+        setError({ code: 'camera', message: `Camera unavailable. ${cs.message ?? ''}`.trim(), recoverable: true, action: 'retry' });
+        return;
+      }
+      if (state.connection === 'live') startSampler();
+      updateDetectSampler();
+      announce('Camera on.');
     },
 
     async resume() {
@@ -2244,7 +2304,7 @@ export function createAssistantController(deps: AssistantDeps): AssistantControl
       const ep = epoch;
       if (paused && doc?.visibilityState !== 'hidden') {
         paused = false;
-        const camP = camera.resume().catch(() => undefined);
+        const camP = cameraOff ? Promise.resolve() : camera.resume().catch(() => undefined);
         send({ type: 'visibility', state: 'visible' });
         const target: ConnectionStatus = !ready
           ? socket

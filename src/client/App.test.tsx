@@ -155,6 +155,23 @@ describe('Session controls', () => {
   });
 });
 
+describe('Pause camera', () => {
+  it('pauses and resumes the camera, says the conversation continues, and blocks Switch camera while paused', () => {
+    const { controller } = setup(liveState());
+    fireEvent.click(button('Pause camera'));
+    expect(controller.setCameraPaused).toHaveBeenLastCalledWith(true);
+    const s = controller.getState();
+    act(() => controller.setState({ cameraPaused: true, camera: { ...s.camera, status: 'paused' } }));
+    const resume = button('Resume camera') as HTMLButtonElement;
+    expect(resume.disabled).toBe(false);
+    expect(document.getElementById(resume.getAttribute('aria-describedby') ?? '')?.textContent).toBe('Camera off — Sightline can still hear you');
+    expect((button('Switch camera') as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById(button('Read label').getAttribute('aria-describedby') ?? '')?.textContent).toContain('Camera off');
+    fireEvent.click(resume);
+    expect(controller.setCameraPaused).toHaveBeenLastCalledWith(false);
+  });
+});
+
 describe('Torch', () => {
   it('is a toggle with aria-pressed that calls setTorch with the opposite state', () => {
     const { controller } = setup(liveState());
