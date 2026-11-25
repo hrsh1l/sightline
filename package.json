@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "tsx watch --clear-screen=false src/server/index.ts",
-    "build": "vite build && tsc -p tsconfig.server.json",
+    "build": "vite build && tsc -p tsconfig.server.json && node scripts/check-client-secrets.mjs",
     "start": "NODE_ENV=production node dist/server/server/index.js",
     "typecheck": "tsc -p tsconfig.client.json && tsc -p tsconfig.server.json --noEmit && tsc -p tsconfig.test.json",
     "lint": "eslint .",

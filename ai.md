@@ -49,7 +49,7 @@ on the phone.
 | Problem | How it was caught | Fix |
 |---|---|---|
 | It replied in **Spanish** | Me, on the S25 | The reply language is now set in the instructions (`ASSISTANT_LANGUAGE`) |
-| **It couldn't read small labels.** Every label request was rejected with HTTP 400 "schema … too many states" | Live run (the fake tests passed) | The JSON schema sent to the model now has no size limits; added a regression test (`servingSchema.ts`) |
+| **It couldn't read small labels.** Every label request was rejected with HTTP 400 "schema … too many states" | Live run (the fake tests passed) | The JSON schema sent to the model now has no size limits; added a regression test (`src/server/vision/servingSchema.test.ts`) |
 | The model check got **empty replies**: the model's "thinking" used up the whole output budget | Live run | Larger output limits |
 | **Quota errors (429) didn't fall back** to the second model | Live run | 429 added to the retryable errors |
 | A **photo cut off mid-instructions was accepted as complete** | Live guide run | If text touches the photo edge, the view is treated as possibly cut off |

@@ -40,8 +40,8 @@ Buttons and typed input remain as fallbacks for noisy kitchens.
 ## Key design choices
 
 - **The app owns the facts; the model owns the conversation.** Gemini interprets what you mean, but the app owns
-  guide progress, date logic and the exact step text. Only your own "Done", checked against your transcribed words,
-  marks a step complete. "Next" never does.
+  guide progress, date logic and the exact step text. Only you mark a step complete, by tapping Done or saying it.
+  A spoken "Done" is checked against your transcribed words, and "Next" never marks anything.
 - **The key stays on the server and nothing is recorded.** A token gate protects any remote access, and every build
   is scanned for leaked keys.
 - **Honest failure.** When the provider is overloaded, Sightline says so and keeps your place. It never makes up an

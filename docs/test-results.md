@@ -6,7 +6,9 @@ integration commit `620a037`.
 Versions: Node `v26.5.1` (repo requires ≥ 22.12), TypeScript 6.0.3, Vitest 5.1.1, Playwright 1.65.1 with
 Chrome Headless Shell **159.0.8154.6** (Playwright build `chromium-headless-shell v1255`).
 
-The five sections below are deliberately separate. Only sections 1–3 were run. **FIXTURE** means a scripted
+The five sections below are deliberately separate. The first run (2026-11-23) covered sections 1–3. Later
+sections and dated entries add live-provider runs with the real Gemini APIs (section 4 and the v2–v4 entries) and
+informal Galaxy S25 use (section 5). The formal phone checklist has not been completed yet. **FIXTURE** means a scripted
 fake in the test code (`tests/fixtures/`, `src/**/__fixtures__`, fakes inside `*.test.ts`). Fixture results show
 that the code plumbing works; they say nothing about how the real Gemini models behave or how the app runs on
 the phone.

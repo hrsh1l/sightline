@@ -248,7 +248,7 @@ More: [docs/s25-connection.md](docs/s25-connection.md).
 
 ## Known limitations
 
-- Tested against real Gemini (see test results) and informally on a Galaxy S25. The formal phone checklist,
+- Tested against real Gemini (see test results) and informally on a Galaxy S25. The formal phone checklist ([docs/mobile-checklist.md](docs/mobile-checklist.md)),
   Find with Bluetooth earbuds, and the instruction companion on the phone have not been fully run. Phone latency
   has not been measured.
 - On the Gemini free tier, requests sometimes fail with overload or quota errors. Sightline reports this rather
